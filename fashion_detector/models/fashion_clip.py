@@ -53,7 +53,7 @@ class FashionClipDetector(BaseDetector):
             return self.text_features_cache[cache_key]
 
         self.load_model()
-        
+
         # Ensembled templates for fashion domain
         templates = [
             "a photo of a {}",
@@ -61,9 +61,9 @@ class FashionClipDetector(BaseDetector):
             "a person wearing {}",
             "close-up photo of a {}",
             "a model wearing a {}",
-            "a product photo of a {}"
+            "a product photo of a {}",
         ]
-        
+
         ensemble_embeddings = []
         for cat in categories:
             # Generate prompts using all templates for this category
@@ -79,14 +79,14 @@ class FashionClipDetector(BaseDetector):
                     text_features = text_features.pooler_output
                 elif not isinstance(text_features, torch.Tensor):
                     text_features = text_features[0]
-                
+
                 # Normalize and average embeddings across templates
                 text_features = text_features / text_features.norm(dim=-1, keepdim=True)
                 mean_embedding = text_features.mean(dim=0)
                 mean_embedding = mean_embedding / mean_embedding.norm(dim=-1)
-                
+
             ensemble_embeddings.append(mean_embedding)
-            
+
         stacked_features = torch.stack(ensemble_embeddings, dim=0)
         self.text_features_cache[cache_key] = stacked_features
         return stacked_features

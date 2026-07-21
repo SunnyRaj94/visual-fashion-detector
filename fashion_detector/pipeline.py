@@ -8,18 +8,75 @@ from fashion_detector.logging import logger, time_it
 
 # Refined CATEGORY_GROUPS with comprehensive child categories and common aliases
 CATEGORY_GROUPS = {
-    "footwear": ["sneakers", "flats", "loafers", "mules slides", "heels", "sandals", "boots", "dress shoes", "shoes"],
-    "bag": ["tote bags", "shoulder bags", "crossbody bags", "handle bags", "backpacks", "belt bags", "clutches", "briefcases", "duffel bags", "messenger bags", "handbags", "handbag", "bags", "bag"],
-    "upper body": ["tops", "sweaters", "shirts", "t shirts", "jackets blazers", "coats", "jackets", "blazers", "hoodies", "hoodie", "polo", "t-shirt", "shirt"],
+    "footwear": [
+        "sneakers",
+        "flats",
+        "loafers",
+        "mules slides",
+        "heels",
+        "sandals",
+        "boots",
+        "dress shoes",
+        "shoes",
+    ],
+    "bag": [
+        "tote bags",
+        "shoulder bags",
+        "crossbody bags",
+        "handle bags",
+        "backpacks",
+        "belt bags",
+        "clutches",
+        "briefcases",
+        "duffel bags",
+        "messenger bags",
+        "handbags",
+        "handbag",
+        "bags",
+        "bag",
+    ],
+    "upper body": [
+        "tops",
+        "sweaters",
+        "shirts",
+        "t shirts",
+        "jackets blazers",
+        "coats",
+        "jackets",
+        "blazers",
+        "hoodies",
+        "hoodie",
+        "polo",
+        "t-shirt",
+        "shirt",
+    ],
     "lower body": ["pants", "jeans", "skirts", "shorts", "jeans", "skirt"],
-    "one-piece dress, suit, jumpsuit": ["dresses", "suits sets", "jumpsuits", "suits", "dress", "suit", "jumpsuit"],
-    "jewelry": ["jewelry", "earrings", "necklaces", "bracelets", "rings", "brooches", "necklace", "bracelet", "ring"],
+    "one-piece dress, suit, jumpsuit": [
+        "dresses",
+        "suits sets",
+        "jumpsuits",
+        "suits",
+        "dress",
+        "suit",
+        "jumpsuit",
+    ],
+    "jewelry": [
+        "jewelry",
+        "earrings",
+        "necklaces",
+        "bracelets",
+        "rings",
+        "brooches",
+        "necklace",
+        "bracelet",
+        "ring",
+    ],
     "headwear": ["hats", "hat", "cap", "caps"],
     "eyewear": ["sunglasses"],
     "belt": ["belts", "belt"],
     "scarf": ["scarves shawls", "scarves", "scarf"],
     "wallet": ["wallets", "wallet"],
-    "watch": ["watches", "watch"]
+    "watch": ["watches", "watch"],
 }
 
 # General negative/neutral classes to absorb false positive crops in background, skin, face, hair, and nothing
@@ -39,12 +96,12 @@ class HybridPipeline:
 
     Uses Composition over Inheritance:
     Stage 1: Locates regions of interest using a detector (e.g., Grounding DINO or YOLO).
-             If using Grounding DINO, parent queries are run in small batches to prevent 
-             token competition, garbage subwords (like ##wear) are filtered out, and 
+             If using Grounding DINO, parent queries are run in small batches to prevent
+             token competition, garbage subwords (like ##wear) are filtered out, and
              overlapping proposals are merged using overlap-aware NMS.
-    Stage 2: Refines the labels and scores of these regions using FashionCLIP, restricting 
-             the classification pool to the subcategories of the detected parent groups, 
-             filtering against negative classes, and validating semantic garment containment 
+    Stage 2: Refines the labels and scores of these regions using FashionCLIP, restricting
+             the classification pool to the subcategories of the detected parent groups,
+             filtering against negative classes, and validating semantic garment containment
              to eliminate false part-garment duplicates (e.g. skirt inside dress).
     """
 
@@ -93,29 +150,36 @@ class HybridPipeline:
         self.min_box_confidence = min_box_confidence
         self.min_crop_size = min_crop_size
 
-    def _filter_contained_garments(self, detections: List[Detection]) -> List[Detection]:
+    def _filter_contained_garments(
+        self, detections: List[Detection]
+    ) -> List[Detection]:
         """Performs semantic garment containment validation.
 
         Discards nested part-body items (like tops, skirts, pants) if they are contained
         inside one-piece garments (like dresses, suits, jumpsuits) to prevent duplicate
         detections of the same garment.
         """
-        one_piece_cats = {"dresses", "suits sets", "jumpsuits", "suits", "dress", "suit", "jumpsuit"}
+        one_piece_cats = {
+            "dresses",
+            "suits sets",
+            "jumpsuits",
+            "suits",
+            "dress",
+            "suit",
+            "jumpsuit",
+        }
 
         # Only discard nested part-body items (from upper/lower body)
         nestable_cats = {
             normalize_string(c)
-            for c in (
-                CATEGORY_GROUPS["upper body"]
-                + CATEGORY_GROUPS["lower body"]
-            )
+            for c in (CATEGORY_GROUPS["upper body"] + CATEGORY_GROUPS["lower body"])
         }
 
         # Sort detections by area descending so larger garments are processed first
         sorted_dets = sorted(
             detections,
             key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]),
-            reverse=True
+            reverse=True,
         )
 
         keep = []
@@ -181,6 +245,7 @@ class HybridPipeline:
         logger.info("Executing Stage 1: Region Proposal...")
 
         from fashion_detector.models.grounding_dino import GroundingDinoDetector
+
         is_dino = isinstance(self.detector, GroundingDinoDetector)
 
         raw_proposals = []
@@ -196,21 +261,30 @@ class HybridPipeline:
                     parent_queries.add(parent)
                 else:
                     parent_queries.add(cat.lower().strip())
-            
+
             parent_queries = list(parent_queries)
-            logger.info(f"Hierarchical Mode: Map target categories to {len(parent_queries)} parent queries.")
+            logger.info(
+                f"Hierarchical Mode: Map target categories to {len(parent_queries)} parent queries."
+            )
 
             # Run Grounding DINO in batches of 4 to prevent prompt token competition
             batch_size = 4
-            batches = [parent_queries[i:i + batch_size] for i in range(0, len(parent_queries), batch_size)]
+            batches = [
+                parent_queries[i : i + batch_size]
+                for i in range(0, len(parent_queries), batch_size)
+            ]
             for idx, batch in enumerate(batches):
-                logger.info(f"Running Grounding DINO Batch {idx+1}/{len(batches)}: {batch}")
+                logger.info(
+                    f"Running Grounding DINO Batch {idx+1}/{len(batches)}: {batch}"
+                )
                 dino_kwargs = kwargs.copy()
                 dino_kwargs["queries"] = batch
-                dino_kwargs["box_threshold"] = dino_kwargs.get("box_threshold", self.min_box_confidence)
-                
+                dino_kwargs["box_threshold"] = dino_kwargs.get(
+                    "box_threshold", self.min_box_confidence
+                )
+
                 batch_proposals = self.detector.detect(image, **dino_kwargs)
-                
+
                 # Filter out garbage proposals (like empty labels or subwords starting with ##)
                 for prop in batch_proposals:
                     clean_label = prop.label.strip().lower()
@@ -241,19 +315,21 @@ class HybridPipeline:
 
             overlap = False
             for kept in filtered_proposals:
-                iou = self.compute_iou(prop.box, kept['box'])
+                iou = self.compute_iou(prop.box, kept["box"])
                 if iou > 0.45:
-                    kept['labels'].add(prop.label)
+                    kept["labels"].add(prop.label)
                     overlap = True
                     break
-            
+
             if not overlap:
-                filtered_proposals.append({
-                    'box': prop.box,
-                    'labels': {prop.label},
-                    'score': prop.score,
-                    'mask': prop.mask
-                })
+                filtered_proposals.append(
+                    {
+                        "box": prop.box,
+                        "labels": {prop.label},
+                        "score": prop.score,
+                        "mask": prop.mask,
+                    }
+                )
 
         logger.info(
             f"Stage 1 yielded {len(raw_proposals)} proposals, filtered down to {len(filtered_proposals)} unique boxes."
@@ -265,7 +341,7 @@ class HybridPipeline:
         # --- Stage 2: Fine-grained FashionCLIP Crop Classification ---
         logger.info("Executing Stage 2: FashionCLIP Crop Classification...")
         self.classifier.load_model()
-        
+
         final_detections = []
         width, height = image.size
         reverse_map = self.build_reverse_mapping()
@@ -275,10 +351,10 @@ class HybridPipeline:
             # Build union of subcategories for all matched parent labels (exact, normalized, or partial)
             valid_candidates = []
             matched_groups = []
-            for l in prop['labels']:
+            for l in prop["labels"]:
                 parent = l.lower().strip()
                 norm_parent = normalize_string(parent)
-                
+
                 # Check exact match first
                 if parent in CATEGORY_GROUPS:
                     matched_groups.append(parent)
@@ -288,37 +364,52 @@ class HybridPipeline:
                     # Check normalized key matching
                     for k in CATEGORY_GROUPS.keys():
                         norm_key = normalize_string(k)
-                        if norm_parent == norm_key or norm_parent in norm_key or norm_key in norm_parent:
+                        if (
+                            norm_parent == norm_key
+                            or norm_parent in norm_key
+                            or norm_key in norm_parent
+                        ):
                             matched_groups.append(k)
-            
+
             matched_groups = list(set(matched_groups))
             for g in matched_groups:
                 candidate_children = CATEGORY_GROUPS[g]
-                valid_candidates.extend([c for c in categories if normalize_string(c) in [normalize_string(x) for x in candidate_children]])
-                
+                valid_candidates.extend(
+                    [
+                        c
+                        for c in categories
+                        if normalize_string(c)
+                        in [normalize_string(x) for x in candidate_children]
+                    ]
+                )
+
             # If the proposal doesn't match any category group, discard it entirely as noise
             if not valid_candidates:
                 logger.info(
                     f"Discarded unrecognized proposal at {list(map(int, prop['box']))} with labels {list(prop['labels'])}"
                 )
                 continue
-                
+
             valid_candidates = list(set(valid_candidates))
             classification_candidates = valid_candidates + NEGATIVE_CLASSES
 
             # Crop region
-            xmin, ymin, xmax, ymax = prop['box']
-            crop = image.crop((
-                max(0, int(xmin)),
-                max(0, int(ymin)),
-                min(width, int(xmax)),
-                min(height, int(ymax))
-            ))
+            xmin, ymin, xmax, ymax = prop["box"]
+            crop = image.crop(
+                (
+                    max(0, int(xmin)),
+                    max(0, int(ymin)),
+                    min(width, int(xmax)),
+                    min(height, int(ymax)),
+                )
+            )
 
             # Encode features and evaluate similarity
             text_features = self.classifier.get_text_features(classification_candidates)
-            inputs = self.classifier.processor(images=crop, return_tensors="pt").to(self.classifier.device)
-            
+            inputs = self.classifier.processor(images=crop, return_tensors="pt").to(
+                self.classifier.device
+            )
+
             with torch.no_grad():
                 image_features = self.classifier.model.get_image_features(**inputs)
                 if hasattr(image_features, "image_embeds"):
@@ -327,9 +418,13 @@ class HybridPipeline:
                     image_features = image_features.pooler_output
                 elif not isinstance(image_features, torch.Tensor):
                     image_features = image_features[0]
-                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-                
-                similarity = (image_features @ text_features.T) * self.classifier.model.logit_scale.exp()
+                image_features = image_features / image_features.norm(
+                    dim=-1, keepdim=True
+                )
+
+                similarity = (
+                    image_features @ text_features.T
+                ) * self.classifier.model.logit_scale.exp()
                 probs = similarity.softmax(dim=-1).cpu().numpy()[0]
 
             best_idx = np.argmax(probs)
@@ -345,16 +440,18 @@ class HybridPipeline:
 
             final_detections.append(
                 Detection(
-                    box=prop['box'],
+                    box=prop["box"],
                     label=best_label,
                     score=best_score,
-                    mask=prop['mask'],
+                    mask=prop["mask"],
                     metadata={
-                        "proposal_label": list(prop['labels'])[0] if prop['labels'] else None,
-                        "proposal_labels": list(prop['labels']),
-                        "proposal_score": prop['score'],
-                        "confidence": best_score
-                    }
+                        "proposal_label": (
+                            list(prop["labels"])[0] if prop["labels"] else None
+                        ),
+                        "proposal_labels": list(prop["labels"]),
+                        "proposal_score": prop["score"],
+                        "confidence": best_score,
+                    },
                 )
             )
 

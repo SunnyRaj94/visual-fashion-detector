@@ -9,7 +9,6 @@ from pydantic import BaseModel, Field, field_validator
 from fashion_detector.models.base import BaseDetector, Detection
 from fashion_detector.logging import logger, time_it
 
-
 DETECTION_PROMPT_TEMPLATE = """You are an expert fashion AI visual search system.
 Detect all fashion items (clothing, accessories, shoes) worn by people or present in this image.
 Do not detect people, only detect the fashion items themselves.
@@ -34,7 +33,9 @@ Example Output format:
 
 class LlmDetectionItem(BaseModel):
     label: str
-    box_2d: List[float] = Field(..., description="[ymin, xmin, ymax, xmax] normalized coordinates")
+    box_2d: List[float] = Field(
+        ..., description="[ymin, xmin, ymax, xmax] normalized coordinates"
+    )
     score: float = Field(default=0.8)
 
     @field_validator("box_2d")
@@ -163,7 +164,7 @@ class VisionLlmDetector(BaseDetector):
 
         except Exception as e:
             logger.error(f"Error calling or parsing Vision LLM response: {e}")
-            if 'response_text' in locals():
+            if "response_text" in locals():
                 logger.debug(f"Failed response text was: {response_text}")
             return []
 
@@ -172,7 +173,7 @@ class VisionLlmDetector(BaseDetector):
             try:
                 # Do output validation using Pydantic v2
                 validated = LlmDetectionItem.model_validate(raw_det)
-                
+
                 label = validated.label.lower().strip()
                 ymin_1000, xmin_1000, ymax_1000, xmax_1000 = validated.box_2d
                 score = validated.score
