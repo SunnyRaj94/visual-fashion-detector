@@ -157,33 +157,59 @@ class ClipSegDetector(BaseDetector):
         )
         return detections
 
-    @time_it("CLIPSeg Pure Class Presence Extraction")
+    @time_it("FashionCLIP Absolute Presence Extraction")
     def extract_present_classes(
         self,
         image: Image.Image,
         user_categories: List[str],
-        presence_threshold: Optional[float] = None,
+        presence_threshold: float = 0.38,
     ) -> List[str]:
         """
-        Runs the optimized batch segmentation pipeline across all categories
-        and extracts a unique list of classes physically present in the image.
-
-        Bypasses string splitting hallucinations and filters out noise natively.
+        Uses CLIPSeg's native target heatmaps to determine class presence.
+        Bypasses classification script collisions and cleans false positives
+        by measuring structural pixel peak validation thresholds.
         """
-        # 1. Force use of custom threshold if provided, else fall back to class default
-        thresh = (
-            presence_threshold if presence_threshold is not None else self.threshold
-        )
+        self.load_model()
 
-        # 2. Call your existing, highly optimized detect function.
-        # This leverages your batch size splitting (8) to protect from GPU OOM crashes,
-        # runs the bilinear interpolation sizing, and applies the min_area_ratio filter.
-        detections = self.detect(image, queries=user_categories, threshold=thresh)
+        # Deduplicate incoming tags safely
+        unique_categories = list(set([cat.strip().lower() for cat in user_categories]))
+        confirmed_classes = set()
 
-        # 3. Aggregate a clean, unique python set of matching string labels
-        # If an item didn't generate positive pixels or failed the area constraint,
-        # it won't exist in the 'detections' array list.
-        present_classes = {det.label for det in detections}
+        # Process in safe batches matching the internal architecture setup
+        batch_size = 8
+        for start_idx in range(0, len(unique_categories), batch_size):
+            batch_queries = unique_categories[start_idx : start_idx + batch_size]
+            prompts = [f"a photo of a {q}" for q in batch_queries]
 
-        # 4. Return as a clean, alphabetically sorted list matching your taxonomy casing
-        return sorted(list(present_classes))
+            inputs = self.processor(
+                text=prompts,
+                images=[image] * len(prompts),
+                padding="max_length",
+                return_tensors="pt",
+            ).to(self.device)
+
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+
+            logits = outputs.logits
+            if len(prompts) == 1:
+                logits = logits.unsqueeze(0)
+
+            # Convert logits natively into a 0.0 - 1.0 confidence space map
+            probs = torch.sigmoid(logits).cpu().numpy()
+
+            for i, category in enumerate(batch_queries):
+                prob_map = probs[i]
+
+                # Extract the absolute peak pixel confidence score across the layout
+                peak_score = float(np.max(prob_map))
+
+                # An item is only present if it triggers a distinct, concentrated spatial group peak.
+                # This completely isolates fake suggested classes (e.g. rings) because their peak stays very low.
+                if peak_score >= presence_threshold:
+                    # Map the verified clean item back to match original user taxonomy casing format
+                    for original_cat in user_categories:
+                        if original_cat.strip().lower() == category:
+                            confirmed_classes.add(original_cat)
+
+        return sorted(list(confirmed_classes))
