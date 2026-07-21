@@ -162,7 +162,7 @@ class ClipSegDetector(BaseDetector):
         self,
         image: Image.Image,
         user_categories: List[str],
-        custom_threshold: Optional[float] = None,
+        presence_threshold: Optional[float] = None,
     ) -> List[str]:
         """
         Runs the optimized batch segmentation pipeline across all categories
@@ -171,7 +171,9 @@ class ClipSegDetector(BaseDetector):
         Bypasses string splitting hallucinations and filters out noise natively.
         """
         # 1. Force use of custom threshold if provided, else fall back to class default
-        thresh = custom_threshold if custom_threshold is not None else self.threshold
+        thresh = (
+            presence_threshold if presence_threshold is not None else self.threshold
+        )
 
         # 2. Call your existing, highly optimized detect function.
         # This leverages your batch size splitting (8) to protect from GPU OOM crashes,
