@@ -12,7 +12,7 @@ CATEGORY_GROUPS = {
     "bag": ["tote bags", "shoulder bags", "crossbody bags", "handle bags", "backpacks", "belt bags", "clutches", "briefcases", "duffel bags", "messenger bags", "handbags", "handbag", "bags", "bag"],
     "upper body": ["tops", "sweaters", "shirts", "t shirts", "jackets blazers", "coats", "jackets", "blazers", "hoodies", "hoodie", "polo", "t-shirt", "shirt"],
     "lower body": ["pants", "jeans", "skirts", "shorts", "jeans", "skirt"],
-    "one-piece": ["dresses", "suits sets", "jumpsuits", "suits", "dress", "suit", "jumpsuit"],
+    "one-piece dress, suit, jumpsuit": ["dresses", "suits sets", "jumpsuits", "suits", "dress", "suit", "jumpsuit"],
     "jewelry": ["jewelry", "earrings", "necklaces", "bracelets", "rings", "brooches", "necklace", "bracelet", "ring"],
     "headwear": ["hats", "hat", "cap", "caps"],
     "eyewear": ["sunglasses"],
@@ -102,6 +102,15 @@ class HybridPipeline:
         """
         one_piece_cats = {"dresses", "suits sets", "jumpsuits", "suits", "dress", "suit", "jumpsuit"}
 
+        # Only discard nested part-body items (from upper/lower body)
+        nestable_cats = {
+            normalize_string(c)
+            for c in (
+                CATEGORY_GROUPS["upper body"]
+                + CATEGORY_GROUPS["lower body"]
+            )
+        }
+
         # Sort detections by area descending so larger garments are processed first
         sorted_dets = sorted(
             detections,
@@ -117,7 +126,12 @@ class HybridPipeline:
                 continue
 
             for kept in keep:
-                if kept.label.lower().strip() in one_piece_cats and det.label.lower().strip() not in one_piece_cats:
+                norm_det = normalize_string(det.label)
+                if (
+                    kept.label.lower().strip() in one_piece_cats
+                    and det.label.lower().strip() not in one_piece_cats
+                    and norm_det in nestable_cats
+                ):
                     # Compute intersection box
                     x1 = max(det.box[0], kept.box[0])
                     y1 = max(det.box[1], kept.box[1])
@@ -336,6 +350,7 @@ class HybridPipeline:
                     score=best_score,
                     mask=prop['mask'],
                     metadata={
+                        "proposal_label": list(prop['labels'])[0] if prop['labels'] else None,
                         "proposal_labels": list(prop['labels']),
                         "proposal_score": prop['score'],
                         "confidence": best_score
