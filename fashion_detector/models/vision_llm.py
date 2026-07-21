@@ -5,8 +5,58 @@ import base64
 from typing import Any, List, Optional
 from PIL import Image
 import litellm
+from pydantic import BaseModel, Field, field_validator
 from fashion_detector.models.base import BaseDetector, Detection
 from fashion_detector.logging import logger, time_it
+
+
+DETECTION_PROMPT_TEMPLATE = """You are an expert fashion AI visual search system.
+Detect all fashion items (clothing, accessories, shoes) worn by people or present in this image.
+Do not detect people, only detect the fashion items themselves.
+
+For each detected fashion item, provide:
+1. "label": The specific category name, which MUST be selected from the Allowed Categories list below.
+2. "box_2d": The bounding box coordinates as [ymin, xmin, ymax, xmax] normalized on a 0 to 1000 scale.
+   (0,0 is the top-left and 1000,1000 is the bottom-right corner of the image. For example, [ymin, xmin, ymax, xmax] coordinates. Scale 0 is the top/left edge, 1000 is the bottom/right edge).
+3. "score": Estimate a confidence score from 0.0 to 1.0.
+
+Allowed Categories:
+{categories}
+
+Your output MUST be a valid JSON array of objects and NOTHING ELSE. Do not include markdown formatting like ```json or ```. Return only the raw JSON string.
+
+Example Output format:
+[
+  {{"label": "jacket", "box_2d": [100, 200, 800, 900], "score": 0.95}},
+  {{"label": "sneakers", "box_2d": [850, 400, 990, 600], "score": 0.88}}
+]"""
+
+
+class LlmDetectionItem(BaseModel):
+    label: str
+    box_2d: List[float] = Field(..., description="[ymin, xmin, ymax, xmax] normalized coordinates")
+    score: float = Field(default=0.8)
+
+    @field_validator("box_2d")
+    @classmethod
+    def validate_box_2d(cls, v: List[float]) -> List[float]:
+        if len(v) != 4:
+            raise ValueError("box_2d must contain exactly 4 coordinates")
+        for val in v:
+            if not (0.0 <= val <= 1000.0):
+                raise ValueError("Coordinates must be between 0.0 and 1000.0")
+        if v[0] > v[2]:
+            raise ValueError("ymin cannot be greater than ymax")
+        if v[1] > v[3]:
+            raise ValueError("xmin cannot be greater than xmax")
+        return v
+
+    @field_validator("score")
+    @classmethod
+    def validate_score(cls, v: float) -> float:
+        if not (0.0 <= v <= 1.0):
+            raise ValueError("score must be between 0.0 and 1.0")
+        return v
 
 
 class VisionLlmDetector(BaseDetector):
@@ -53,29 +103,7 @@ class VisionLlmDetector(BaseDetector):
         width, height = image.size
         base64_image = self._encode_image_to_base64(image)
 
-        # Build prompt instructing the model to output a structured JSON list of boxes
-        prompt = f"""
-You are an expert fashion AI visual search system.
-Detect all fashion items (clothing, accessories, shoes) worn by people or present in this image.
-Do not detect people, only detect the fashion items themselves.
-
-For each detected fashion item, provide:
-1. "label": The specific category name, which MUST be selected from the Allowed Categories list below.
-2. "box_2d": The bounding box coordinates as [ymin, xmin, ymax, xmax] normalized on a 0 to 1000 scale.
-   (0,0 is the top-left and 1000,1000 is the bottom-right corner of the image. For example, [ymin, xmin, ymax, xmax] coordinates. Scale 0 is the top/left edge, 1000 is the bottom/right edge).
-3. "score": Estimate a confidence score from 0.0 to 1.0.
-
-Allowed Categories:
-{categories}
-
-Your output MUST be a valid JSON array of objects and NOTHING ELSE. Do not include markdown formatting like ```json or ```. Return only the raw JSON string.
-
-Example Output format:
-[
-  {{"label": "jacket", "box_2d": [100, 200, 800, 900], "score": 0.95}},
-  {{"label": "sneakers", "box_2d": [850, 400, 990, 600], "score": 0.88}}
-]
-"""
+        prompt = DETECTION_PROMPT_TEMPLATE.format(categories=categories)
 
         messages = [
             {
@@ -92,6 +120,9 @@ Example Output format:
 
         api_key_to_use = kwargs.get("api_key", self.api_key)
         api_base_to_use = kwargs.get("api_base", self.api_base)
+
+        if api_base_to_use and not model_to_use.startswith("openai/"):
+            model_to_use = f"openai/{model_to_use}"
 
         # Gather completion parameters
         completion_kwargs = {
@@ -110,8 +141,10 @@ Example Output format:
 
         try:
             response = litellm.completion(**completion_kwargs)
-
             response_text = response.choices[0].message.content.strip()
+
+            # Always log raw_response for debugging
+            logger.debug(f"Raw response from Vision LLM: {response_text}")
 
             # Clean up potential markdown formatting wrapping the JSON
             if response_text.startswith("```"):
@@ -124,26 +157,25 @@ Example Output format:
                     lines = lines[:-1]
                 response_text = "\n".join(lines).strip()
 
-            logger.debug(f"Raw response from Vision LLM: {response_text}")
-
             raw_detections = json.loads(response_text)
+            if not isinstance(raw_detections, list):
+                raise ValueError("Expected raw response to parse to a list")
 
         except Exception as e:
             logger.error(f"Error calling or parsing Vision LLM response: {e}")
-            # Return empty list on failure
+            if 'response_text' in locals():
+                logger.debug(f"Failed response text was: {response_text}")
             return []
 
         detections = []
         for raw_det in raw_detections:
             try:
-                label = raw_det.get("label", "").lower().strip()
-                box_2d = raw_det.get("box_2d", [])
-                score = float(raw_det.get("score", 0.8))
-
-                if len(box_2d) != 4:
-                    continue
-
-                ymin_1000, xmin_1000, ymax_1000, xmax_1000 = box_2d
+                # Do output validation using Pydantic v2
+                validated = LlmDetectionItem.model_validate(raw_det)
+                
+                label = validated.label.lower().strip()
+                ymin_1000, xmin_1000, ymax_1000, xmax_1000 = validated.box_2d
+                score = validated.score
 
                 # Convert 0-1000 scale back to absolute pixel coordinates
                 xmin = (xmin_1000 / 1000.0) * width
@@ -158,18 +190,18 @@ Example Output format:
                 ymax = max(0.0, min(ymax, float(height)))
 
                 # Double-check label is in allowed categories
-                if label in categories:
+                if label in [c.lower().strip() for c in categories]:
                     detections.append(
                         Detection(
                             box=[xmin, ymin, xmax, ymax],
                             label=label,
                             score=score,
-                            metadata={"raw_llm_box": box_2d},
+                            metadata={"raw_llm_box": validated.box_2d},
                         )
                     )
             except Exception as item_error:
                 logger.warning(
-                    f"Failed to parse item detection: {raw_det}. Error: {item_error}"
+                    f"Failed to parse or validate item detection: {raw_det}. Error: {item_error}"
                 )
 
         logger.info(f"Vision LLM detected {len(detections)} items.")
