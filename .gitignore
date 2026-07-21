@@ -1,0 +1,30 @@
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# Python Cache & Eggs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+fashion_detector.egg-info/
+build/
+dist/
+
+# Dataset & Models & Cache
+data/
+cache/
+annotations/
+logs/
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# IDEs & System Files
+.DS_Store
+.vscode/
+.idea/

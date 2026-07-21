@@ -1,0 +1,79 @@
+# Configuration for Fashion Item Detection Framework
+
+# Device can be "cuda", "mps", "cpu", or "auto"
+device: "auto"
+
+# Local cache directories
+cache_dir: "./cache"
+
+# Logging configuration
+logging:
+  level: "INFO"
+  file: "logs/fashion_detector.log"
+
+# Category list for detection
+categories:
+  clothing:
+    - "shirt"
+    - "t-shirt"
+    - "polo"
+    - "sweater"
+    - "hoodie"
+    - "jacket"
+    - "blazer"
+    - "coat"
+    - "dress"
+    - "top"
+    - "jeans"
+    - "pants"
+    - "shorts"
+    - "skirt"
+    - "suit"
+    - "jumpsuit"
+    - "scarf"
+  accessories:
+    - "handbag"
+    - "backpack"
+    - "wallet"
+    - "belt"
+    - "watch"
+    - "bracelet"
+    - "necklace"
+    - "earrings"
+    - "ring"
+    - "hat"
+    - "cap"
+    - "sunglasses"
+    - "shoes"
+    - "boots"
+    - "sneakers"
+
+# Config for candidate models
+models:
+  grounding_dino:
+    name: "IDEA-Research/grounding-dino-tiny" # also "IDEA-Research/grounding-dino-base"
+    box_threshold: 0.25
+    text_threshold: 0.25
+  
+  yolo:
+    name: "yolov8m.pt" # download automatically from ultralytics repo, e.g. yolov8x.pt or yolov11m.pt
+    conf_threshold: 0.25
+    iou_threshold: 0.45
+  
+  florence2:
+    name: "microsoft/Florence-2-base" # or "microsoft/Florence-2-large"
+    conf_threshold: 0.3
+  
+  clipseg:
+    name: "CIDAS/clipseg-rd64-refined"
+    threshold: 0.3
+  
+  fashion_clip:
+    name: "patrickjohncyh/fashion-clip"
+  
+  vision_llm:
+    name: "gemini/gemini-1.5-flash" # Used through LiteLLM
+    temperature: 0.0
+    max_tokens: 1000
+    api_key: null  # Optional custom API key string
+    api_base: null # Optional custom API base endpoint URL (e.g. for Ollama or vLLM proxy)
