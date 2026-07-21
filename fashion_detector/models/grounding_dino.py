@@ -105,8 +105,15 @@ class GroundingDinoDetector(BaseDetector):
         labels = results.get("text_labels", results.get("labels", []))
 
         for box, score, label in zip(boxes, scores, labels):
-            # Cleanup labels since Grounding DINO returns substrings of the text query
+            # Ensure label is a string
+            if not isinstance(label, str):
+                label = str(label)
+                
             cleaned_label = label.strip().lower()
+
+            # Filter out empty, punctuation, or subword fragment labels
+            if not cleaned_label or cleaned_label.startswith("##") or cleaned_label in [".", ",", ";", ":", "-", ""]:
+                continue
 
             # Grounding DINO returns bounding box as [xmin, ymin, xmax, ymax]
             xmin, ymin, xmax, ymax = box.tolist()

@@ -156,3 +156,32 @@ class ClipSegDetector(BaseDetector):
             f"CLIPSeg detected {len(detections)} fashion items using {len(queries)} categories."
         )
         return detections
+
+    @time_it("CLIPSeg Pure Class Presence Extraction")
+    def extract_present_classes(
+        self,
+        image: Image.Image,
+        user_categories: List[str],
+        custom_threshold: Optional[float] = None,
+    ) -> List[str]:
+        """
+        Runs the optimized batch segmentation pipeline across all categories
+        and extracts a unique list of classes physically present in the image.
+
+        Bypasses string splitting hallucinations and filters out noise natively.
+        """
+        # 1. Force use of custom threshold if provided, else fall back to class default
+        thresh = custom_threshold if custom_threshold is not None else self.threshold
+
+        # 2. Call your existing, highly optimized detect function.
+        # This leverages your batch size splitting (8) to protect from GPU OOM crashes,
+        # runs the bilinear interpolation sizing, and applies the min_area_ratio filter.
+        detections = self.detect(image, queries=user_categories, threshold=thresh)
+
+        # 3. Aggregate a clean, unique python set of matching string labels
+        # If an item didn't generate positive pixels or failed the area constraint,
+        # it won't exist in the 'detections' array list.
+        present_classes = {det.label for det in detections}
+
+        # 4. Return as a clean, alphabetically sorted list matching your taxonomy casing
+        return sorted(list(present_classes))

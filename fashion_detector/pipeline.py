@@ -462,3 +462,100 @@ class HybridPipeline:
             f"Hybrid pipeline successfully completed. Yielded {len(final_detections)} refined fashion items."
         )
         return final_detections
+
+
+class ClassificationFirstPipeline:
+    """A classification-first hybrid pipeline for fashion item detection.
+
+    Stage 1: Uses a classifier (e.g., FashionCLIP) to extract categories present in
+             the image from a flat target category list.
+    Stage 2: Runs a precision object detector (e.g., Grounding DINO or Florence-2)
+             to locate ONLY the extracted active categories, preventing prompt competition
+             and false positive boxes from unrelated classes.
+    """
+
+    def __init__(
+        self,
+        classifier: FashionClipDetector,
+        detector: BaseDetector,
+        presence_threshold: float = 0.15,
+        min_box_confidence: float = 0.20,
+    ):
+        """Initializes the classification-first pipeline.
+
+        Args:
+            classifier: Stage 1 classifier used to extract present classes.
+            detector: Stage 2 precision object detector.
+            presence_threshold: Category presence alignment threshold for Stage 1.
+            min_box_confidence: Minimum box score to keep in Stage 2.
+        """
+        self.classifier = classifier
+        self.detector = detector
+        self.presence_threshold = presence_threshold
+        self.min_box_confidence = min_box_confidence
+
+    @time_it("Classification-First Pipeline Total Execution")
+    def detect(
+        self, image: Image.Image, categories: Optional[List[str]] = None, **kwargs: Any
+    ) -> List[Detection]:
+        """Runs the classification-first pipeline on an image.
+
+        Args:
+            image: PIL Image.
+            categories: Target categories to consider. If None, uses config categories.
+            **kwargs: Extra parameters to pass to Stage 2 detector.
+
+        Returns:
+            List of validated and localized Detection objects.
+        """
+        if not categories:
+            categories = self.detector.config.get_all_categories()
+
+        # Deduplicate categories
+        categories = list(set(categories))
+
+        # --- Stage 1: Active Category Extraction ---
+        logger.info("Executing Stage 1: FashionCLIP Active Category Extraction...")
+        self.classifier.load_model()
+        
+        presence_thresh = kwargs.get("presence_threshold", self.presence_threshold)
+        active_categories = self.classifier.extract_present_classes(
+            image=image,
+            user_categories=categories,
+            presence_threshold=presence_thresh,
+        )
+        
+        logger.info(f"Stage 1 completed. Active categories found: {active_categories}")
+        if not active_categories:
+            logger.info("No active categories extracted. Returning empty list.")
+            return []
+
+        # --- Stage 2: Precision Object Detection ---
+        logger.info("Executing Stage 2: Precision Object Detection...")
+        self.detector.load_model()
+
+        det_kwargs = kwargs.copy()
+        det_kwargs["queries"] = active_categories
+        
+        # Determine if using Florence-2 or Grounding DINO to set correct tasks/parameters
+        from fashion_detector.models.florence2 import Florence2Detector
+        if isinstance(self.detector, Florence2Detector):
+            det_kwargs["task"] = det_kwargs.get("task", "<CAPTION_TO_PHRASE_GROUNDING>")
+            det_kwargs["conf_threshold"] = det_kwargs.get("conf_threshold", self.min_box_confidence)
+        else:
+            det_kwargs["box_threshold"] = det_kwargs.get("box_threshold", self.min_box_confidence)
+
+        # Run precision detection on active categories
+        raw_detections = self.detector.detect(image, **det_kwargs)
+
+        # Filter detections by minimum confidence
+        min_conf = det_kwargs.get("box_threshold", det_kwargs.get("conf_threshold", self.min_box_confidence))
+        final_detections = []
+        for det in raw_detections:
+            if det.score >= min_conf:
+                final_detections.append(det)
+
+        logger.info(
+            f"Classification-first pipeline completed. Localized {len(final_detections)} items."
+        )
+        return final_detections

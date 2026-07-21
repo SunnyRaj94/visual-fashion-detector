@@ -371,7 +371,17 @@ def visualize_detections(
         "#7CB342",
     ]
 
-    for idx, det in enumerate(detections):
+    # Sort detections by area descending so smaller boxes stack on top of larger ones
+    sorted_dets = sorted(
+        detections,
+        key=lambda d: (
+            ((d.get("box") or d.get("bbox") or [0, 0, 0, 0])[2] - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[0]) *
+            ((d.get("box") or d.get("bbox") or [0, 0, 0, 0])[3] - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[1])
+        ),
+        reverse=True,
+    )
+
+    for idx, det in enumerate(sorted_dets):
 
         box = det.get("box") or det.get("bbox")
 

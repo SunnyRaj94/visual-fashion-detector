@@ -129,6 +129,17 @@ class Florence2Detector(BaseDetector):
         ).to(self.device)
 
         self.model.eval()
+        self.templates = [
+            "a photo of a {}",
+            "a fashion photo of a {}",
+            "a person wearing {}",
+            "close-up photo of a {}",
+            "a model wearing a {}",
+            "a product photo of a {}",
+        ]
+
+        # In-Memory Cache Mapping: { "t shirts": torch.Tensor([1, 512]) }
+        self.embedding_cache: Dict[str, torch.Tensor] = {}
         logger.info("Florence-2 model loaded successfully.")
 
     @time_it("Florence-2 Inference")
@@ -272,3 +283,106 @@ class Florence2Detector(BaseDetector):
             f"Florence-2 detected {len(filtered_detections)} fashion items (filtered from {len(detections)} total)."
         )
         return filtered_detections
+
+    def get_text_embedding_with_cache(self, category: str) -> torch.Tensor:
+        """Generates an ensembled vector embedding, fetching from cache if hit."""
+        cleaned_cat = category.strip().lower()
+
+        # 1. Cache Hit Check
+        if cleaned_cat in self.embedding_cache:
+            return self.embedding_cache[cleaned_cat]
+
+        # 2. Cache Miss: Fill templates and encode text-only features via FashionCLIP
+        prompt_variations = [tmpl.format(cleaned_cat) for tmpl in self.templates]
+
+        # FashionCLIP's processor allows pure text tokens without needing an accompanying image matrix
+        inputs = self.processor(
+            text=prompt_variations, padding=True, return_tensors="pt"
+        ).to(self.device)
+
+        with torch.no_grad():
+            text_features = self.model.get_text_features(**inputs)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+
+            # Aggregate variants together
+            ensembled_embedding = text_features.mean(dim=0, keepdim=True)
+            ensembled_embedding = ensembled_embedding / ensembled_embedding.norm(
+                dim=-1, keepdim=True
+            )
+
+        # 3. Commit vector footprint to internal cache memory
+        self.embedding_cache[cleaned_cat] = ensembled_embedding
+        return ensembled_embedding
+
+    @time_it("Florence-2 Pure Class Presence Extraction")
+    def extract_present_classes(
+        self, image: Image.Image, user_categories: List[str]
+    ) -> List[str]:
+        """
+        Extracts verified active classes by intersecting a non-suggestive detailed
+        caption canvas with your target fashion taxonomy.
+        """
+        self.load_model()
+
+        # Phase 1: Generate a Neutral Image Caption (Zero Suggestion Prompts)
+        # Using <DETAILED_CAPTION> keeps the model from hallucinating a provided list
+        prompt = "<DETAILED_CAPTION>"
+
+        orig_w, orig_h = image.size
+        resized_image = image.resize((768, 768))
+        torch_dtype = torch.float16 if self.device in ["cuda", "mps"] else torch.float32
+
+        inputs = self.processor(text=prompt, images=resized_image, return_tensors="pt")
+        inputs = {
+            k: (
+                v.to(self.device).to(torch_dtype)
+                if v.dtype == torch.float
+                else v.to(self.device)
+            )
+            for k, v in inputs.items()
+        }
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=512,
+                num_beams=3,
+                do_sample=False,
+                use_cache=False,
+            )
+
+        generated_text = self.processor.batch_decode(outputs, skip_special_tokens=True)[
+            0
+        ]
+        clean_canvas_description = generated_text.lower().strip()
+        logger.info(f"Verified Image Canvas Text Footprint: {clean_canvas_description}")
+
+        # Phase 2: Run Strict Linguistic Correlation Checks
+        verified_classes = set()
+
+        for category in user_categories:
+            cat_lower = category.strip().lower()
+
+            # 1. Base keyword checks (e.g., "blazer" or "sunglasses")
+            if cat_lower in clean_canvas_description:
+                verified_classes.add(category)
+                continue
+
+            # 2. De-pluralization logic for common fashion words
+            if cat_lower.endswith("s"):
+                singular = cat_lower[:-1]
+                # Avoid turning words like "dress" into "dres"
+                if len(singular) > 3 and singular in clean_canvas_description:
+                    verified_classes.add(category)
+                    continue
+
+            # 3. Component word alignment (e.g., matching "jackets blazers" to "blazer")
+            words = cat_lower.split()
+            if len(words) > 1:
+                for word in words:
+                    if len(word) > 3 and word in clean_canvas_description:
+                        verified_classes.add(category)
+                        break
+
+        return sorted(list(verified_classes))

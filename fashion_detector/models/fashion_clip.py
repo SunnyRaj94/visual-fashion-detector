@@ -186,6 +186,61 @@ class FashionClipDetector(BaseDetector):
 
         return refined_detections
 
+    @time_it("FashionCLIP Global Presence Extraction")
+    def extract_present_classes(
+        self,
+        image: Image.Image,
+        user_categories: List[str],
+        presence_threshold: float = 0.15,
+    ) -> List[str]:
+        """
+        Adapts the existing batch classification infrastructure to run global
+        and spatial-quadrant visual-text alignment over the whole image.
+
+        Args:
+            image: Original PIL Image.
+            user_categories: Flat taxonomy string list to search for.
+            presence_threshold: Probability margin above which a category is confirmed.
+
+        Returns:
+            A clean list of unique string categories present in the image matrix.
+        """
+        width, height = image.size
+
+        # 1. Mock proposals representing the whole image and key zones (left, right, center)
+        # This keeps group photos from drowning out local items (e.g. shoes, small accessories)
+        mock_proposals = [
+            Detection(box=[0, 0, width, height], label="global", score=1.0),
+            Detection(box=[0, 0, width // 2, height], label="left_half", score=1.0),
+            Detection(
+                box=[width // 2, 0, width, height], label="right_half", score=1.0
+            ),
+            Detection(
+                box=[0, height // 3, width, 2 * height // 3],
+                label="center_belt",
+                score=1.0,
+            ),
+            Detection(
+                box=[0, 2 * height // 3, width, height],
+                label="bottom_footwear",
+                score=1.0,
+            ),
+        ]
+
+        # 2. Reuse your existing, highly optimized batch processing & ensembled templates logic
+        # This protects you from text parsing logic errors (like matching "ring" in "wearing")
+        refined_detections = self.classify_crops(
+            image=image, proposals=mock_proposals, categories=user_categories
+        )
+
+        # 3. Aggregate only the labels that cross your threshold bar
+        confirmed_classes = set()
+        for det in refined_detections:
+            if det.score >= presence_threshold:
+                confirmed_classes.add(det.label)
+
+        return sorted(list(confirmed_classes))
+
     def detect(self, image: Image.Image, **kwargs: Any) -> List[Detection]:
         """Runs the complete detection pipeline.
 
