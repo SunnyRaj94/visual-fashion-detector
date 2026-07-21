@@ -1,6 +1,6 @@
-# Fashion Item Detection & Localization Research Framework
+# Visual Fashion Detector (Two-Stage Hybrid Pipeline)
 
-A modular, configuration-driven research framework to detect and localize fashion items (clothing, accessories, and shoes) from unconstrained real-world images. The framework allows users to compare state-of-the-art vision models (Grounding DINO, YOLOv8, Florence-2, CLIPSeg, and Vision LLMs) and combine them into hybrid pipelines (e.g., Detector + FashionCLIP embedder/classifier).
+A modular, configuration-driven research and production framework to detect, localize, and classify fashion items (clothing, accessories, and shoes) from unconstrained real-world images. The framework allows users to compare state-of-the-art vision models (Grounding DINO, YOLOv8, Florence-2, CLIPSeg, and Vision LLMs) and combine them into high-accuracy hybrid pipelines (e.g., Detector + FashionCLIP embedder/classifier).
 
 ---
 
@@ -9,6 +9,13 @@ A modular, configuration-driven research framework to detect and localize fashio
 - **SOLID & Modular Architecture**: Easy to extend with new models by implementing the `BaseDetector` interface.
 - **Dynamic Clickable Overlays**: Generates interactive HTML visualization widgets with clickable bounding boxes and tooltips directly inside Jupyter notebooks.
 - **Domain-Specific Classification**: Uses FashionCLIP to perform zero-shot classification on cropped region proposals from Stage-1 detectors.
+- **Production-Grade Two-Stage Orchestration**:
+  * **Stage 1: Batched Parent Queries**: Parent queries are run in small batches of 4 to eliminate Grounding DINO prompt token competition and label suppression in multi-person images.
+  * **Stage 1: Small Box Area Filtering**: Dynamically filters out tiny noise boxes smaller than 150 pixels or 0.15% of the image area.
+  * **Stage 2: Overlap-Aware NMS & Mapping**: Merges overlapping boxes while keeping all parent labels. Cleans up DINO outputs (handles subwords, spaces, and singular/plural mapping) and maps them to target parent groups using exact, normalized, or partial string matches.
+  * **Stage 2: Restrained Subcategory Search + Negative Filtering**: Restricts classification candidates to the union of active parent subcategories while injecting negative/neutral classes (`human face`, `skin`, `hair`, `background`, `nothing`) to filter out false positive proposals.
+  * **Stage 2: Semantic Containment Validation Round**: Discards nested part-body items (like tops, skirts, pants) if they are contained $>70\%$ inside one-piece garments (like dresses, suits, jumpsuits) to prevent duplicate classifications of the same garment.
+- **Text Embedding Caching**: Performance optimization using prompt text embedding cache to reduce duplicate text encoding latency to `0.0001` seconds.
 - **Comprehensive Benchmarking**: Automatic latency profiling, memory logging, and IoU metric calculation for model comparison.
 - **Structured Logging & Error Handling**: Unified logging with timing decorators and context managers to inspect bottleneck steps.
 
