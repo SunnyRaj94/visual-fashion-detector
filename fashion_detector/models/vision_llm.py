@@ -90,6 +90,9 @@ Example Output format:
             }
         ]
 
+        api_key_to_use = kwargs.get("api_key", self.api_key)
+        api_base_to_use = kwargs.get("api_base", self.api_base)
+
         # Gather completion parameters
         completion_kwargs = {
             "model": model_to_use,
@@ -97,9 +100,6 @@ Example Output format:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
-
-        api_key_to_use = kwargs.get("api_key", self.api_key)
-        api_base_to_use = kwargs.get("api_base", self.api_base)
 
         if api_key_to_use:
             completion_kwargs["api_key"] = api_key_to_use

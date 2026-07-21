@@ -72,8 +72,8 @@ models:
     name: "patrickjohncyh/fashion-clip"
   
   vision_llm:
-    name: "gemini/gemini-1.5-flash" # Used through LiteLLM
+    name: "openai/google/gemma-4-e2b" # Used through LiteLLM
     temperature: 0.0
     max_tokens: 1000
-    api_key: null  # Optional custom API key string
-    api_base: null # Optional custom API base endpoint URL (e.g. for Ollama or vLLM proxy)
+    api_key: lm-studio  # Optional custom API key string
+    api_base: 'http://127.0.0.1:1234/v1' # Optional custom API base endpoint URL (e.g. for Ollama or vLLM proxy)
