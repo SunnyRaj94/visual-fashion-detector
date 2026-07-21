@@ -375,8 +375,14 @@ def visualize_detections(
     sorted_dets = sorted(
         detections,
         key=lambda d: (
-            ((d.get("box") or d.get("bbox") or [0, 0, 0, 0])[2] - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[0]) *
-            ((d.get("box") or d.get("bbox") or [0, 0, 0, 0])[3] - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[1])
+            (
+                (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[2]
+                - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[0]
+            )
+            * (
+                (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[3]
+                - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[1]
+            )
         ),
         reverse=True,
     )

@@ -108,11 +108,15 @@ class GroundingDinoDetector(BaseDetector):
             # Ensure label is a string
             if not isinstance(label, str):
                 label = str(label)
-                
+
             cleaned_label = label.strip().lower()
 
             # Filter out empty, punctuation, or subword fragment labels
-            if not cleaned_label or cleaned_label.startswith("##") or cleaned_label in [".", ",", ";", ":", "-", ""]:
+            if (
+                not cleaned_label
+                or cleaned_label.startswith("##")
+                or cleaned_label in [".", ",", ";", ":", "-", ""]
+            ):
                 continue
 
             # Grounding DINO returns bounding box as [xmin, ymin, xmax, ymax]
