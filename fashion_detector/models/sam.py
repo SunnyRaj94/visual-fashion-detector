@@ -11,6 +11,24 @@ from transformers import (
     Sam2Model,
     Sam2Processor,
 )
+
+try:
+    from transformers import (
+        Sam2VideoModel,
+        Sam2VideoProcessor,
+        Sam3Model,
+        Sam3Processor,
+        Sam3VideoModel,
+        Sam3VideoProcessor,
+    )
+except ImportError:
+    Sam2VideoModel = None
+    Sam2VideoProcessor = None
+    Sam3Model = None
+    Sam3Processor = None
+    Sam3VideoModel = None
+    Sam3VideoProcessor = None
+
 from fashion_detector.models.base import BaseDetector, Detection
 from fashion_detector.logging import logger, time_it
 
@@ -41,35 +59,145 @@ class SamDetector(BaseDetector):
 
         hf_cache = os.path.join(self.cache_dir, "huggingface")
 
+        # Custom loader for SAM 3.1 multiplex checkpoint (sam3.1_multiplex.pt)
+        if "sam3" in self.model_name.lower():
+            try:
+                from huggingface_hub import hf_hub_download
+                from transformers import AutoConfig
+
+                logger.info(
+                    f"Attempting to download custom SAM 3.1 checkpoint 'sam3.1_multiplex.pt' for {self.model_name}..."
+                )
+                ckpt_path = hf_hub_download(
+                    repo_id=self.model_name,
+                    filename="sam3.1_multiplex.pt",
+                    cache_dir=hf_cache,
+                )
+                config = AutoConfig.from_pretrained(
+                    self.model_name, cache_dir=hf_cache
+                )
+
+                if Sam3Model is not None:
+                    self.model = Sam3Model(config)
+                elif Sam3VideoModel is not None:
+                    self.model = Sam3VideoModel(config)
+                elif Sam2VideoModel is not None:
+                    self.model = Sam2VideoModel(config)
+                else:
+                    self.model = Sam2Model(config)
+
+                state_dict = torch.load(ckpt_path, map_location="cpu")
+                if isinstance(state_dict, dict) and "model" in state_dict:
+                    state_dict = state_dict["model"]
+
+                det_state_dict = {}
+                if isinstance(state_dict, dict):
+                    for k, v in state_dict.items():
+                        if k.startswith("detector."):
+                            det_state_dict[k[len("detector.") :]] = v
+                        else:
+                            det_state_dict[k] = v
+                else:
+                    det_state_dict = state_dict
+
+                self.model.load_state_dict(det_state_dict, strict=False)
+                self.model.to(self.device)
+
+                if Sam3Processor is not None:
+                    try:
+                        self.processor = Sam3Processor.from_pretrained(
+                            self.model_name, cache_dir=hf_cache
+                        )
+                    except Exception:
+                        self.processor = AutoProcessor.from_pretrained(
+                            self.model_name, cache_dir=hf_cache
+                        )
+                elif Sam3VideoProcessor is not None:
+                    self.processor = Sam3VideoProcessor.from_pretrained(
+                        self.model_name, cache_dir=hf_cache
+                    )
+                else:
+                    self.processor = Sam2Processor.from_pretrained(
+                        self.model_name, cache_dir=hf_cache
+                    )
+
+                self.model.eval()
+                logger.info("SAM 3.1 custom checkpoint loaded successfully.")
+                return
+            except Exception as e_sam3:
+                logger.warning(
+                    f"SAM 3.1 custom weight loading raised: {e_sam3}. Falling back to standard model loaders."
+                )
+
         # Load processor and model dynamically
+        kwargs_model = {"cache_dir": hf_cache}
+        if "sam3" in self.model_name.lower():
+            kwargs_model["weight_name"] = "sam3.1_multiplex.pt"
+
         try:
             self.processor = AutoProcessor.from_pretrained(
                 self.model_name, cache_dir=hf_cache
             )
-            self.model = AutoModelForMaskGeneration.from_pretrained(
-                self.model_name, cache_dir=hf_cache
-            ).to(self.device)
+            try:
+                self.model = AutoModelForMaskGeneration.from_pretrained(
+                    self.model_name, **kwargs_model
+                ).to(self.device)
+            except Exception:
+                self.model = AutoModelForMaskGeneration.from_pretrained(
+                    self.model_name, cache_dir=hf_cache
+                ).to(self.device)
         except Exception as e1:
             logger.warning(
-                f"AutoModelForMaskGeneration attempt for {self.model_name} raised: {e1}. Trying specific SAM/SAM2 fallbacks."
+                f"AutoModelForMaskGeneration attempt for {self.model_name} raised: {e1}. Trying SAM2/SAM3 video fallbacks."
             )
-            try:
-                self.processor = Sam2Processor.from_pretrained(
-                    self.model_name, cache_dir=hf_cache
-                )
-                self.model = Sam2Model.from_pretrained(
-                    self.model_name, cache_dir=hf_cache
-                ).to(self.device)
-            except Exception as e2:
-                logger.warning(
-                    f"Sam2Processor attempt for {self.model_name} raised: {e2}. Falling back to SamProcessor/SamModel."
-                )
-                self.processor = SamProcessor.from_pretrained(
-                    self.model_name, cache_dir=hf_cache
-                )
-                self.model = SamModel.from_pretrained(
-                    self.model_name, cache_dir=hf_cache
-                ).to(self.device)
+            loaded = False
+            if Sam2VideoProcessor is not None and Sam2VideoModel is not None:
+                try:
+                    self.processor = Sam2VideoProcessor.from_pretrained(
+                        self.model_name, cache_dir=hf_cache
+                    )
+                    try:
+                        self.model = Sam2VideoModel.from_pretrained(
+                            self.model_name, **kwargs_model
+                        ).to(self.device)
+                    except Exception:
+                        self.model = Sam2VideoModel.from_pretrained(
+                            self.model_name, cache_dir=hf_cache
+                        ).to(self.device)
+                    loaded = True
+                except Exception as e2:
+                    logger.warning(
+                        f"Sam2VideoProcessor attempt for {self.model_name} raised: {e2}. Trying Sam2Processor."
+                    )
+
+            if not loaded:
+                try:
+                    self.processor = Sam2Processor.from_pretrained(
+                        self.model_name, cache_dir=hf_cache
+                    )
+                    try:
+                        self.model = Sam2Model.from_pretrained(
+                            self.model_name, **kwargs_model
+                        ).to(self.device)
+                    except Exception:
+                        self.model = Sam2Model.from_pretrained(
+                            self.model_name, cache_dir=hf_cache
+                        ).to(self.device)
+                except Exception as e3:
+                    logger.warning(
+                        f"Sam2Processor attempt for {self.model_name} raised: {e3}. Falling back to SamProcessor/SamModel."
+                    )
+                    self.processor = SamProcessor.from_pretrained(
+                        self.model_name, cache_dir=hf_cache
+                    )
+                    try:
+                        self.model = SamModel.from_pretrained(
+                            self.model_name, **kwargs_model
+                        ).to(self.device)
+                    except Exception:
+                        self.model = SamModel.from_pretrained(
+                            self.model_name, cache_dir=hf_cache
+                        ).to(self.device)
 
         self.model.eval()
         logger.info("SAM model loaded successfully.")
