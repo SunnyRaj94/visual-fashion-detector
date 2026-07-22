@@ -30,6 +30,25 @@ Example Output format:
   {{"label": "sneakers", "box_2d": [850, 400, 990, 600], "score": 0.88}}
 ]"""
 
+CLASSIFICATION_PROMPT_TEMPLATE = """You are an expert fashion AI visual search classifier.
+Analyze the image and identify all fashion items (clothing, accessories, shoes) worn by people or present in this image.
+
+Your task is to identify which of the Allowed Categories are present in the image.
+For each category present in the image, provide:
+1. "label": The specific category name, which MUST be selected from the Allowed Categories list below.
+2. "score": Estimate a presence confidence score from 0.0 to 1.0.
+
+Allowed Categories:
+{categories}
+
+Your output MUST be a valid JSON array of objects and NOTHING ELSE. Do not include markdown formatting like ```json or ```. Return only the raw JSON string.
+
+Example Output format:
+[
+  {{"label": "jacket", "score": 0.95}},
+  {{"label": "sneakers", "score": 0.88}}
+]"""
+
 
 class LlmDetectionItem(BaseModel):
     label: str
@@ -207,3 +226,100 @@ class VisionLlmDetector(BaseDetector):
 
         logger.info(f"Vision LLM detected {len(detections)} items.")
         return detections
+
+    @time_it("Vision LLM Class Presence Extraction")
+    def extract_present_classes(
+        self,
+        image: Image.Image,
+        user_categories: List[str],
+        presence_threshold: float = 0.15,
+    ) -> List[str]:
+        """Extracts active fashion categories present in the input image using Vision LLM classification prompt.
+
+        Args:
+            image: PIL Image.
+            user_categories: List of candidate category names to search for.
+            presence_threshold: Minimum confidence score threshold (0.0 to 1.0).
+
+        Returns:
+            List of unique category names present in the image with score >= presence_threshold.
+        """
+        if not user_categories:
+            return []
+
+        base64_image = self._encode_image_to_base64(image)
+        prompt = CLASSIFICATION_PROMPT_TEMPLATE.format(categories=user_categories)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                    },
+                ],
+            }
+        ]
+
+        model_to_use = self.model_name
+        api_key_to_use = self.api_key
+        api_base_to_use = self.api_base
+
+        if api_base_to_use and not model_to_use.startswith("openai/"):
+            model_to_use = f"openai/{model_to_use}"
+
+        completion_kwargs = {
+            "model": model_to_use,
+            "messages": messages,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        if api_key_to_use:
+            completion_kwargs["api_key"] = api_key_to_use
+        if api_base_to_use:
+            completion_kwargs["api_base"] = api_base_to_use
+
+        logger.info(
+            f"Querying Vision LLM {model_to_use} for class presence extraction..."
+        )
+
+        confirmed_classes = set()
+        norm_user_cats = {c.strip().lower(): c for c in user_categories}
+
+        try:
+            response = litellm.completion(**completion_kwargs)
+            response_text = response.choices[0].message.content.strip()
+
+            # Clean up potential markdown formatting wrapping the JSON
+            if response_text.startswith("```"):
+                lines = response_text.splitlines()
+                if lines[0].startswith("```"):
+                    lines = lines[1:]
+                if lines[-1].startswith("```"):
+                    lines = lines[:-1]
+                response_text = "\n".join(lines).strip()
+
+            raw_classes = json.loads(response_text)
+            if not isinstance(raw_classes, list):
+                raise ValueError("Expected raw response to parse to a list")
+
+            for item in raw_classes:
+                if isinstance(item, dict):
+                    label = str(item.get("label", "")).strip().lower()
+                    score = float(item.get("score", 1.0))
+                    if score >= presence_threshold and label in norm_user_cats:
+                        confirmed_classes.add(norm_user_cats[label])
+
+        except Exception as e:
+            logger.error(
+                f"Error calling or parsing Vision LLM classification response: {e}"
+            )
+            if "response_text" in locals():
+                logger.debug(f"Failed response text was: {response_text}")
+
+        logger.info(
+            f"Vision LLM extracted {len(confirmed_classes)} active present classes."
+        )
+        return sorted(list(confirmed_classes))
