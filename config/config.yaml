@@ -51,7 +51,7 @@ categories:
 # Config for candidate models
 models:
   sam:
-    name: "facebook/sam2.1-hiera-small" # also "facebook/sam2.1-hiera-small.
+    name: "facebook/sam3.1" # also "facebook/sam2.1-hiera-small.
     points_per_side: 16
     pred_iou_thresh: 0.8
     stability_score_thresh: 0.85
