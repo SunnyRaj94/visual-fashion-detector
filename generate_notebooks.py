@@ -690,6 +690,126 @@ graph TD
 We recommend proceeding with the **YOLO (Custom Fashion Fine-tuned) + FashionCLIP (Embedding Extract) + FAISS (Index Search)** stack for the production visual search system.
 """)]
 
+# ----------------- Notebook 14: SAM Detection -----------------
+nb14_cells = [
+    md_cell("""# 14. Segment Anything Model (SAM 3.1 / SAM 2 / SAM) Experiments
+The **Segment Anything Model (SAM)** is a foundation vision model for promptable, zero-shot image segmentation.
+
+In this notebook, we explore SAM for fashion item detection and segmentation:
+1. **Model Initialization**: Load SAM (`facebook/sam-vit-base` or `facebook/sam2.1-hiera-small`) via Hugging Face `transformers`.
+2. **Box-Prompted Segmentation**: Supply bounding box prompts (e.g. coarse proposals from Stage 1 detectors) to generate pixel-accurate segmentation masks.
+3. **Point-Prompted Segmentation**: Pass interactive 2D point prompts `(x, y)` to segment targeted garment or accessory regions.
+4. **Automatic Grid Instance Segmentation**: Generate zero-shot masks across an image grid.
+5. **Visualization**: Render interactive HTML overlays with bounding boxes, confidence scores, and segmentation masks.
+"""),
+    code_cell("""import os
+import sys
+import numpy as np
+from PIL import Image
+from IPython.display import HTML
+
+sys.path.append(os.path.abspath("."))
+
+from fashion_detector.config import Config
+from fashion_detector.models.sam import SamDetector
+from fashion_detector.utils import load_image, generate_interactive_html
+
+# Load configuration
+config = Config("config/config.yaml")
+
+# Initialize SAM Detector
+detector = SamDetector(config)
+detector.load_model()
+"""),
+    md_cell("""## 1. Box-Prompted Segmentation
+Supply candidate bounding boxes `[xmin, ymin, xmax, ymax]` and target category queries to SAM.
+SAM refines the bounding box boundaries and extracts pixel-level binary masks.
+"""),
+    code_cell("""image_path = "data/fashion_model_street.jpg"
+image = load_image(image_path)
+
+# Example candidate bounding box prompts (e.g. from Stage 1 proposals)
+prompt_boxes = [
+    [120, 80, 520, 480],   # Upper garment / jacket area
+    [480, 150, 920, 450],  # Lower garment / pants area
+]
+labels = ["jacket", "pants"]
+
+# Run SAM box-prompted detection
+detections = detector.detect(image, input_boxes=prompt_boxes, queries=labels)
+
+print(f"SAM Box-Prompted Detections: {len(detections)}")
+for det in detections:
+    mask_str = f"shape={det.mask.shape}" if det.mask is not None else "None"
+    print(f"- Label: '{det.label}', Score: {det.score:.3f}, Box: {list(map(int, det.box))}, Mask: {mask_str}")
+"""),
+    md_cell("""## 2. Render Interactive Visualization
+Render an interactive HTML overlay displaying SAM bounding boxes and labels.
+"""),
+    code_cell("""html_str = generate_interactive_html(
+    image,
+    detections,
+    title="SAM Box-Prompted Fashion Item Segmentation"
+)
+HTML(html_str)
+"""),
+    md_cell("""## 3. Point-Prompted Segmentation
+Supply 2D point coordinates `[x, y]` to prompt SAM on specific visual keypoints.
+"""),
+    code_cell("""img_w, img_h = image.size
+
+# Sample point prompts near center of key fashion regions
+point_prompts = [
+    [img_w // 2, img_h // 3],   # Upper body point
+    [img_w // 2, 2 * img_h // 3] # Lower body point
+]
+
+point_detections = detector.detect(image, input_points=point_prompts, pred_iou_thresh=0.75)
+
+print(f"SAM Point-Prompted Detections: {len(point_detections)}")
+for det in point_detections:
+    print(f"- Label: '{det.label}', Score: {det.score:.3f}, Box: {list(map(int, det.box))}")
+"""),
+    md_cell("""## 4. Automatic Zero-Shot Grid Segmentation
+Generate segmentation masks automatically across an image grid using `points_per_side`.
+"""),
+    code_cell("""# Run automatic grid segmentation
+auto_detections = detector.detect(
+    image,
+    points_per_side=16,
+    pred_iou_thresh=0.82,
+    remove_small_boxes=True
+)
+
+print(f"SAM Automatic Grid Segmentation detected {len(auto_detections)} item masks.")
+"""),
+    md_cell("""## 5. Native Segmented Class Image Extraction (SAM 3.1)
+Extract pixel-isolated RGBA PIL Images (transparent background) for each class natively using `segment_classes()` or `extract_segmented_objects()`.
+"""),
+    code_cell("""# Extract isolated transparent PNG crops per class
+class_crops = detector.segment_classes(
+    image,
+    user_categories=["jacket", "pants"],
+    boxes=prompt_boxes
+)
+
+for label, crop_list in class_crops.items():
+    print(f"Extracted {len(crop_list)} isolated segmented image(s) for class '{label}':")
+    for idx, crop in enumerate(crop_list):
+        print(f"  - Crop {idx+1}: dimensions={crop.size}, mode={crop.mode}")
+
+# Display isolated transparent PNG crop for first item
+if "jacket" in class_crops and len(class_crops["jacket"]) > 0:
+    display(class_crops["jacket"][0])
+"""),
+    md_cell("""## 6. Summary & Key Takeaways
+- **SAM 3.1 Architecture**: Utilizes `facebook/sam2.1-hiera-small` for fast, state-of-the-art segmentation.
+- **Native Class Segmentation**: `segment_classes()` and `extract_segmented_objects()` produce clean, transparent RGBA PNG crops for every detected item.
+- **Stage 2 Synergy**: Candidate proposals from Stage 1 (e.g. YOLO, Grounding DINO) can be passed directly as box prompts to SAM 3 for background suppression and clean mask extraction.
+- **Flexibility**: Supports box prompts, point prompts, and automatic grid generation.
+"""),
+]
+
 # Save all notebooks
 create_notebook("01_environment_setup.ipynb", nb1_cells)
 create_notebook("02_dataset_loading.ipynb", nb2_cells)
@@ -703,4 +823,6 @@ create_notebook("09_vision_llm_experiments.ipynb", nb9_cells)
 create_notebook("10_hybrid_pipeline_experiments.ipynb", nb10_cells)
 create_notebook("11_comparative_evaluation.ipynb", nb11_cells)
 create_notebook("12_final_recommendations.ipynb", nb12_cells)
+create_notebook("14_sam_detection_experiments.ipynb", nb14_cells)
 print("All notebooks created successfully!")
+

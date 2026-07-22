@@ -91,6 +91,20 @@ class Config:
                 "box_threshold": 0.25,
                 "text_threshold": 0.25,
             },
+            "sam": {
+                "name": "facebook/sam2.1-hiera-small",
+                "points_per_side": 16,
+                "pred_iou_thresh": 0.8,
+                "stability_score_thresh": 0.85,
+                "box_threshold": 0.25,
+            },
+            "sam3.1": {
+                "name": "facebook/sam2.1-hiera-small",
+                "points_per_side": 16,
+                "pred_iou_thresh": 0.8,
+                "stability_score_thresh": 0.85,
+                "box_threshold": 0.25,
+            },
             "yolo": {
                 "name": "yolov8m.pt",
                 "conf_threshold": 0.25,
