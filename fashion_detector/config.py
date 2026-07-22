@@ -92,14 +92,7 @@ class Config:
                 "text_threshold": 0.25,
             },
             "sam": {
-                "name": "facebook/sam2.1-hiera-small",
-                "points_per_side": 16,
-                "pred_iou_thresh": 0.8,
-                "stability_score_thresh": 0.85,
-                "box_threshold": 0.25,
-            },
-            "sam3.1": {
-                "name": "facebook/sam2.1-hiera-small",
+                "name": "facebook/sam3.1",
                 "points_per_side": 16,
                 "pred_iou_thresh": 0.8,
                 "stability_score_thresh": 0.85,

@@ -444,7 +444,6 @@ class SamDetector(BaseDetector):
         return cat_map
 
 
-
 # Class aliases for flexible instantiation
 SAMDetector = SamDetector
 Sam3Detector = SamDetector
