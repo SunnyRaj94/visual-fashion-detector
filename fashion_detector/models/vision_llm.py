@@ -273,7 +273,7 @@ class VisionLlmDetector(BaseDetector):
             response_text = response.choices[0].message.content.strip()
 
             # Always log raw_response for debugging
-            logger.info(f"Raw response from Vision LLM: \n{response_text}\n")
+            logger.debug(f"Raw response from Vision LLM: \n{response_text}\n")
 
             # Clean up potential markdown formatting wrapping the JSON
             if response_text.startswith("```"):
