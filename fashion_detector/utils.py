@@ -10,6 +10,7 @@ from fashion_detector.models.base import Detection
 from fashion_detector.logging import logger
 import matplotlib.pyplot as plt
 from IPython.display import HTML, display
+import math
 
 CATEGORY_MAPPING = {
     # Clothing Overlaps
@@ -543,3 +544,75 @@ def visualize_detections(
     html += "</div>"
 
     display(HTML(html))
+
+
+def display_imageGrid(
+    images: List[Image.Image], imgs_per_row: int = 3, max_width: int = 15
+) -> None:
+    """
+    Displays a list of PIL Images in a grid layout inside a Jupyter Notebook cell.
+
+    Args:
+        images: List of PIL.Image.Image instances to display.
+        imgs_per_row: Number of images per row (e.g., 2 or 3).
+        max_width: Maximum width of the entire figure layout in inches.
+
+    Raises:
+        TypeError: If input validation fails for types or structures.
+        ValueError: If imgs_per_row is less than 1 or images list is empty.
+    """
+    # 1. Input Type and Value Validations
+    if not isinstance(images, list):
+        raise TypeError(
+            f"Expected a list for 'images', but got {type(images).__name__}."
+        )
+
+    if not images:
+        raise ValueError("The 'images' list cannot be empty.")
+
+    for idx, img in enumerate(images):
+        if not isinstance(img, Image.Image):
+            raise TypeError(
+                f"Element at index {idx} is not a valid PIL Image. Got {type(img).__name__}."
+            )
+
+    if not isinstance(imgs_per_row, int) or isinstance(imgs_per_row, bool):
+        raise TypeError(
+            f"Expected an integer for 'imgs_per_row', but got {type(imgs_per_row).__name__}."
+        )
+
+    if imgs_per_row < 1:
+        raise ValueError(
+            f"Value of 'imgs_per_row' must be 1 or greater. Got {imgs_per_row}."
+        )
+
+    # 2. Grid Dimensions Calculations
+    num_images = len(images)
+    num_rows = math.ceil(num_images / imgs_per_row)
+
+    # Dynamically scale height proportionally to maintain reasonable image aspect ratios
+    fig_width = max_width
+    fig_height = (fig_width / imgs_per_row) * num_rows
+
+    # 3. Render Canvas
+    fig, axes = plt.subplots(num_rows, imgs_per_row, figsize=(fig_width, fig_height))
+
+    # Flatten axes matrix to a simple 1D array for easier iteration
+    # Handle edge case where a 1x1 subplots call returns a single axis object rather than an array
+    if num_images == 1 and imgs_per_row == 1:
+        axes = [axes]
+    else:
+        axes = axes.flatten() if hasattr(axes, "flatten") else [axes]
+
+    # 4. Populate Grid Subplots
+    for i in range(len(axes)):
+        if i < num_images:
+            # Display image data arrays safely
+            axes[i].imshow(images[i])
+            axes[i].axis("off")  # Suppress pixel position coordinate ticks
+        else:
+            # Hide leftover empty subplot containers in the final grid row
+            axes[i].set_visible(False)
+
+    plt.tight_layout()
+    plt.show()

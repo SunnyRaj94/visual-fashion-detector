@@ -217,30 +217,100 @@ class SamDetector(BaseDetector):
     def _post_process_masks(
         self, outputs: Any, inputs: Dict[str, Any]
     ) -> List[torch.Tensor]:
-        """Post-processes raw SAM / SAM2 model masks into original image coordinates."""
+        """Post-processes raw SAM / SAM2 / SAM3 model masks into original image coordinates."""
         pred_masks = outputs.pred_masks.cpu()
         orig_sizes = inputs["original_sizes"].cpu()
 
+        # Reshape pred_masks to 4D tensor (batch_size, num_masks, height, width) if spatial dims are 1D
+        if pred_masks.ndim == 3:
+            B, N, L = pred_masks.shape
+            side = int(round(L ** 0.5))
+            if side * side == L:
+                pred_masks = pred_masks.view(B, N, side, side)
+            else:
+                pred_masks = pred_masks.unsqueeze(1)
+        elif pred_masks.ndim == 2:
+            N, L = pred_masks.shape
+            side = int(round(L ** 0.5))
+            if side * side == L:
+                pred_masks = pred_masks.view(1, N, side, side)
+
+        # Try processor post_process_masks
         if hasattr(self.processor, "post_process_masks"):
             try:
-                return self.processor.post_process_masks(pred_masks, orig_sizes)
+                return self.processor.post_process_masks(
+                    pred_masks, orig_sizes, binarize=True
+                )
             except Exception:
-                pass
+                try:
+                    return self.processor.post_process_masks(pred_masks, orig_sizes)
+                except Exception:
+                    pass
 
         if hasattr(self.processor, "image_processor"):
             img_proc = self.processor.image_processor
             if hasattr(img_proc, "post_process_masks"):
                 try:
-                    reshaped_sizes = inputs["reshaped_input_sizes"].cpu()
+                    reshaped_sizes = inputs.get("reshaped_input_sizes")
+                    if reshaped_sizes is not None:
+                        return img_proc.post_process_masks(
+                            pred_masks, orig_sizes, reshaped_sizes.cpu(), binarize=True
+                        )
+                except Exception:
+                    pass
+
+                try:
                     return img_proc.post_process_masks(
-                        pred_masks, orig_sizes, reshaped_sizes
+                        pred_masks, orig_sizes, binarize=True
                     )
                 except Exception:
-                    return img_proc.post_process_masks(pred_masks, orig_sizes)
+                    try:
+                        return img_proc.post_process_masks(pred_masks, orig_sizes)
+                    except Exception:
+                        pass
 
-        raise RuntimeError(
-            "Unable to find compatible post_process_masks method on SAM processor."
-        )
+        # Fallback: Direct PyTorch bilinear interpolation to original image dimensions
+        results = []
+        for i, orig_size in enumerate(orig_sizes):
+            h_orig, w_orig = int(orig_size[0]), int(orig_size[1])
+            m = pred_masks[i] if pred_masks.ndim >= 3 else pred_masks
+            if m.ndim == 2:
+                m = m.unsqueeze(0).unsqueeze(0)
+            elif m.ndim == 3:
+                m = m.unsqueeze(1)
+
+            interpolated = (
+                torch.nn.functional.interpolate(
+                    m.float(),
+                    size=(h_orig, w_orig),
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                > 0
+            )
+            results.append(interpolated.squeeze(1))
+
+        return results
+
+    def _get_iou_scores(self, outputs: Any) -> np.ndarray:
+        """Safely extracts iou_scores or confidence scores array from SAM/SAM2/SAM3 model outputs."""
+        if hasattr(outputs, "iou_scores") and outputs.iou_scores is not None:
+            return outputs.iou_scores.cpu().numpy()
+        elif hasattr(outputs, "scores") and outputs.scores is not None:
+            return outputs.scores.cpu().numpy()
+        elif hasattr(outputs, "pred_logits") and outputs.pred_logits is not None:
+            logits = outputs.pred_logits.detach().cpu()
+            return torch.sigmoid(logits).numpy()
+        elif hasattr(outputs, "presence_logits") and outputs.presence_logits is not None:
+            logits = outputs.presence_logits.detach().cpu()
+            return torch.sigmoid(logits).numpy()
+
+        # Fallback to default ones array matching mask batch shape
+        if hasattr(outputs, "pred_masks"):
+            masks = outputs.pred_masks
+            shape = masks.shape[:-2] if masks.ndim >= 3 else (1, 1)
+            return np.ones(shape, dtype=np.float32)
+        return np.ones((1, 1), dtype=np.float32)
 
     def _extract_box_from_mask(self, mask: np.ndarray) -> Optional[List[float]]:
         """Computes [xmin, ymin, xmax, ymax] bounding box from a binary mask array."""
@@ -309,18 +379,27 @@ class SamDetector(BaseDetector):
             # Post-process masks to original image dimensions
             masks = self._post_process_masks(outputs, inputs)[0]
 
-            iou_scores = outputs.iou_scores.cpu().numpy()
+            iou_scores = self._get_iou_scores(outputs)
             if iou_scores.ndim > 2:
-                iou_scores = iou_scores[0]  # shape: (num_boxes, 3)
+                iou_scores = iou_scores[0]  # shape: (num_boxes, num_masks)
 
             for idx, box in enumerate(prompt_boxes):
-                box_masks = masks[idx].numpy()  # (3, H, W)
-                box_scores = iou_scores[idx]  # (3,)
+                box_masks = masks[idx].numpy() if idx < len(masks) else masks[0].numpy()
+                if box_masks.ndim == 2:
+                    box_masks = np.expand_dims(box_masks, axis=0)
+
+                box_scores = iou_scores[idx] if idx < len(iou_scores) else iou_scores[0]
+                if np.isscalar(box_scores) or box_scores.ndim == 0:
+                    box_scores = np.array([box_scores])
 
                 # Select best mask for this box
                 best_mask_idx = int(np.argmax(box_scores))
                 best_score = float(box_scores[best_mask_idx])
-                best_mask = box_masks[best_mask_idx].astype(bool)
+                raw_best_mask = box_masks[best_mask_idx] if best_mask_idx < len(box_masks) else box_masks[0]
+                if raw_best_mask.dtype == bool:
+                    best_mask = raw_best_mask
+                else:
+                    best_mask = (raw_best_mask > 0.0)
 
                 # Determine label
                 if queries and idx < len(queries):
@@ -365,11 +444,26 @@ class SamDetector(BaseDetector):
 
         elif prompt_points is not None and len(prompt_points) > 0:
             # --- Mode 2: Point-Prompted Segmentation ---
-            formatted_points = self._format_points_for_processor(prompt_points)
+            is_sam3 = (
+                Sam3Processor is not None and isinstance(self.processor, Sam3Processor)
+            ) or (type(self.processor).__name__ == "Sam3Processor")
 
-            raw_inputs = self.processor(
-                image, input_points=formatted_points, return_tensors="pt"
-            )
+            if is_sam3:
+                input_boxes = []
+                for pt in prompt_points:
+                    if isinstance(pt[0], (int, float)):
+                        input_boxes.append([float(pt[0]), float(pt[1]), float(pt[0]) + 1.0, float(pt[1]) + 1.0])
+                    else:
+                        input_boxes.append([[float(p[0]), float(p[1]), float(p[0]) + 1.0, float(p[1]) + 1.0] for p in pt])
+                formatted_boxes = [[box for box in input_boxes]]
+                raw_inputs = self.processor(
+                    image, input_boxes=formatted_boxes, return_tensors="pt"
+                )
+            else:
+                formatted_points = self._format_points_for_processor(prompt_points)
+                raw_inputs = self.processor(
+                    image, input_points=formatted_points, return_tensors="pt"
+                )
             inputs = self._prepare_inputs(raw_inputs)
 
             with torch.no_grad():
@@ -377,16 +471,18 @@ class SamDetector(BaseDetector):
 
             masks = self._post_process_masks(outputs, inputs)[0]
 
-            iou_scores = outputs.iou_scores.cpu().numpy()
-            while iou_scores.ndim > 1:
-                iou_scores = iou_scores[0]
+            iou_scores = self._get_iou_scores(outputs)
+            if iou_scores.ndim > 1:
+                iou_scores = iou_scores.reshape(-1)
 
-            for mask_idx in range(masks.shape[1]):
+            num_masks = min(masks.shape[1] if masks.ndim > 1 else len(masks), len(iou_scores))
+            for mask_idx in range(num_masks):
                 score = float(iou_scores[mask_idx])
                 if score < pred_iou_thresh:
                     continue
 
-                mask_np = masks[0, mask_idx].numpy().astype(bool)
+                raw_mask = masks[0, mask_idx].numpy() if masks.ndim >= 3 else masks[mask_idx].numpy()
+                mask_np = raw_mask if raw_mask.dtype == bool else (raw_mask > 0.0)
                 extracted_box = self._extract_box_from_mask(mask_np)
                 if not extracted_box:
                     continue
@@ -413,6 +509,10 @@ class SamDetector(BaseDetector):
 
         else:
             # --- Mode 3: Automatic Grid-based Instance Segmentation ---
+            is_sam3 = (
+                Sam3Processor is not None and isinstance(self.processor, Sam3Processor)
+            ) or (type(self.processor).__name__ == "Sam3Processor")
+
             pts_side = kwargs.get("points_per_side", self.points_per_side)
             x_pts = np.linspace(15, img_w - 15, pts_side)
             y_pts = np.linspace(15, img_h - 15, pts_side)
@@ -423,10 +523,17 @@ class SamDetector(BaseDetector):
             batch_size = 16
             for i in range(0, len(grid_points), batch_size):
                 batch_pts = grid_points[i : i + batch_size]
-                formatted_points = self._format_points_for_processor(batch_pts)
-                raw_inputs = self.processor(
-                    image, input_points=formatted_points, return_tensors="pt"
-                )
+                if is_sam3:
+                    input_boxes = [[float(pt[0]), float(pt[1]), float(pt[0]) + 1.0, float(pt[1]) + 1.0] for pt in batch_pts]
+                    formatted_boxes = [[box for box in input_boxes]]
+                    raw_inputs = self.processor(
+                        image, input_boxes=formatted_boxes, return_tensors="pt"
+                    )
+                else:
+                    formatted_points = self._format_points_for_processor(batch_pts)
+                    raw_inputs = self.processor(
+                        image, input_points=formatted_points, return_tensors="pt"
+                    )
                 inputs = self._prepare_inputs(raw_inputs)
 
                 with torch.no_grad():
@@ -434,16 +541,18 @@ class SamDetector(BaseDetector):
 
                 masks = self._post_process_masks(outputs, inputs)[0]
 
-                iou_scores = outputs.iou_scores.cpu().numpy()
-                while iou_scores.ndim > 1:
-                    iou_scores = iou_scores[0]
+                iou_scores = self._get_iou_scores(outputs)
+                if iou_scores.ndim > 1:
+                    iou_scores = iou_scores.reshape(-1)
 
-                for mask_idx in range(masks.shape[1]):
+                num_masks = min(masks.shape[1] if masks.ndim > 1 else len(masks), len(iou_scores))
+                for mask_idx in range(num_masks):
                     score = float(iou_scores[mask_idx])
                     if score < pred_iou_thresh:
                         continue
 
-                    mask_np = masks[0, mask_idx].numpy().astype(bool)
+                    raw_mask = masks[0, mask_idx].numpy() if masks.ndim >= 3 else masks[mask_idx].numpy()
+                    mask_np = raw_mask if raw_mask.dtype == bool else (raw_mask > 0.0)
                     extracted_box = self._extract_box_from_mask(mask_np)
                     if not extracted_box:
                         continue
@@ -511,6 +620,19 @@ class SamDetector(BaseDetector):
             else:
                 mask_np = det.mask
 
+            if mask_np.ndim > 2:
+                mask_np = np.squeeze(mask_np)
+                if mask_np.ndim > 2:
+                    mask_np = mask_np[0]
+
+            if mask_np.shape != (h, w):
+                mask_pil = Image.fromarray((mask_np > 0).astype(np.uint8) * 255).resize(
+                    (w, h), Image.NEAREST
+                )
+                mask_np = np.array(mask_pil) > 0
+            else:
+                mask_np = mask_np.astype(bool)
+
             rgba = np.zeros((h, w, 4), dtype=np.uint8)
             rgba[:, :, :3] = img_np
             rgba[:, :, 3] = np.where(mask_np, 255, 0).astype(np.uint8)
@@ -518,8 +640,9 @@ class SamDetector(BaseDetector):
             segmented_pil = Image.fromarray(rgba, mode="RGBA")
 
             if crop_to_box:
-                xmin, ymin, xmax, ymax = det.box
-                pad = kwargs.get("padding", 0)
+                crop_box = self._extract_box_from_mask(mask_np) or det.box
+                xmin, ymin, xmax, ymax = crop_box
+                pad = kwargs.get("padding", 5)
                 crop_xmin = max(0, int(xmin) - pad)
                 crop_ymin = max(0, int(ymin) - pad)
                 crop_xmax = min(w, int(xmax) + pad)
