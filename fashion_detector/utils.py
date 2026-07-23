@@ -8,6 +8,92 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from fashion_detector.models.base import Detection
 from fashion_detector.logging import logger
+import matplotlib.pyplot as plt
+from IPython.display import HTML, display
+
+CATEGORY_MAPPING = {
+    # Clothing Overlaps
+    "dresses": "dresses",
+    "jumpsuits": "jumpsuits",
+    "skirts": "skirts",
+    "shorts": "shorts",
+    "tops": "tops_shirts",
+    "shirts": "tops_shirts",
+    "t shirts": "tops_shirts",
+    "sweaters": "sweaters",
+    "jackets": "jackets_blazers",
+    "blazers": "jackets_blazers",
+    "jackets blazers": "jackets_blazers",
+    "coats": "coats",
+    "pants": "pants_jeans",
+    "jeans": "pants_jeans",
+    "suits": "suits_sets",
+    "suits sets": "suits_sets",
+    # Footwear Overlaps
+    "sneakers": "sneakers",
+    "boots": "boots",
+    "sandals": "sandals",
+    "heels": "heels",
+    "flats": "flats_loafers",
+    "loafers": "flats_loafers",
+    "mules slides": "mules_slides",
+    "dress shoes": "dress_shoes",
+    # Bags Overlaps
+    "tote bags": "tote_bags",
+    "backpacks": "backpacks",
+    "belt bags": "belt_bags",
+    "briefcases": "briefcases",
+    "duffel bags": "travel_duffel_bags",
+    "shoulder bags": "shoulder_crossbody_bags",
+    "crossbody bags": "shoulder_crossbody_bags",
+    "messenger bags": "shoulder_crossbody_bags",
+    "handle bags": "hand_handle_bags",
+    "clutches": "hand_handle_bags",
+    # Accessories & Jewelry Overlaps
+    "sunglasses": "sunglasses",
+    "belts": "belts",
+    "wallets": "wallets",
+    "hats": "hats",
+    "watches": "watches",
+    "scarves": "scarves_shawls_ties",
+    "scarves shawls": "scarves_shawls_ties",
+    "ties": "scarves_shawls_ties",
+    "jewelry": "jewelry",
+    "earrings": "jewelry",
+    "necklaces": "jewelry",
+    "bracelets": "jewelry",
+    "rings": "jewelry",
+    "brooches": "jewelry",
+}
+user_categories = list(CATEGORY_MAPPING.values())
+
+
+def clean_categories(raw_detected_categories: List[str]) -> List[str]:
+    """Cleans and maps raw detected categories to a standardized set."""
+    # Example Cleanup Sequence:
+    cleaned_unique_categories = list(
+        set(CATEGORY_MAPPING.get(cat, cat) for cat in raw_detected_categories)
+    )
+    logger.info(f"Cleaned and mapped categories: {cleaned_unique_categories}")
+    return cleaned_unique_categories
+
+
+def execute_detection(
+    image_path,
+    detector,
+    visualize=False,
+    categories=user_categories,
+):
+    image = load_image(image_path)
+    detections = detector.detect(image, queries=categories)
+    logger.info(f"Hybrid pipeline detected {len(detections)} fashion items:")
+    for d in detections:
+        logger.info(
+            f"- {d.label.capitalize()} (refined from {d.metadata.get('proposal_label')}): score={d.score:.2f}"
+        )
+    if visualize:
+        visualize_detections(image, detector._to_dict(detections))
+    return detections
 
 
 def load_image(image_input: Union[str, Image.Image]) -> Image.Image:
@@ -273,15 +359,6 @@ def generate_interactive_html(
     """)
 
     return "\n".join(html_out)
-
-
-import base64
-import io
-from typing import Dict, List, Union
-
-import matplotlib.pyplot as plt
-from IPython.display import HTML, display
-from PIL import Image
 
 
 def display_img(image: Image.Image, figsize=(6, 6)):

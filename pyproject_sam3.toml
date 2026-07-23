@@ -1,18 +1,21 @@
 [project]
 name = "fashion-detector"
 version = "0.1.0"
-description = "A research framework for fashion item detection, localization, and evaluation."
+description = "A research framework for fashion item detection, localization, and evaluation supporting SAM 2 and SAM 3."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "torch",
     "torchvision",
-    "transformers>=4.38.0,<5.0.0",
+    # Fetching the freshest source tree commit explicitly containing sam3 tracking files
+    "transformers @ git+https://github.com",
     "ultralytics>=8.1.0",
     "litellm>=1.20.0",
     "pyyaml>=6.0.0",
     "pillow>=10.0.0",
-    "numpy>=1.26.0",
+    # Locked below 2.0 to resolve the legacy scipy optimization long attribute conflict
+    "numpy>=1.26.0,<2.0.0",
+    "scipy>=1.12.0",
     "pandas>=2.1.0",
     "matplotlib>=3.8.0",
     "opencv-python>=4.8.0",
@@ -21,7 +24,7 @@ dependencies = [
     "notebook>=7.0.0",
     "scikit-learn>=1.3.0",
     "accelerate>=0.25.0",
-    "huggingface-hub>=0.19.0",
+    "huggingface-hub>=0.23.0",
     "einops>=0.7.0",
     "timm>=0.9.0",
     "ipywidgets>=8.1.8",
@@ -33,4 +36,3 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["fashion_detector*"]
-

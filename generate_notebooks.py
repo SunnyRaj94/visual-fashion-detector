@@ -725,13 +725,14 @@ detector.load_model()
 Supply candidate bounding boxes `[xmin, ymin, xmax, ymax]` and target category queries to SAM.
 SAM refines the bounding box boundaries and extracts pixel-level binary masks.
 """),
-    code_cell("""image_path = "data/fashion_model_street.jpg"
+    code_cell("""image_path = "image.png" if os.path.exists("image.png") else "data/fashion_model_street.jpg"
 image = load_image(image_path)
+w, h = image.size
 
-# Example candidate bounding box prompts (e.g. from Stage 1 proposals)
+# Candidate bounding box prompts scaled to image dimensions
 prompt_boxes = [
-    [120, 80, 520, 480],   # Upper garment / jacket area
-    [480, 150, 920, 450],  # Lower garment / pants area
+    [int(w * 0.28), int(h * 0.14), int(w * 0.72), int(h * 0.32)],  # Upper garment / jacket area
+    [int(w * 0.30), int(h * 0.33), int(w * 0.70), int(h * 0.76)]   # Lower garment / pants area
 ]
 labels = ["jacket", "pants"]
 
@@ -760,8 +761,8 @@ Supply 2D point coordinates `[x, y]` to prompt SAM on specific visual keypoints.
 
 # Sample point prompts near center of key fashion regions
 point_prompts = [
-    [img_w // 2, img_h // 3],   # Upper body point
-    [img_w // 2, 2 * img_h // 3] # Lower body point
+    [img_w // 2, img_h // 4],     # Upper body point
+    [img_w // 2, 2 * img_h // 3]   # Lower body point
 ]
 
 point_detections = detector.detect(image, input_points=point_prompts, pred_iou_thresh=0.75)
@@ -801,6 +802,8 @@ for label, crop_list in class_crops.items():
 # Display isolated transparent PNG crop for first item
 if "jacket" in class_crops and len(class_crops["jacket"]) > 0:
     display(class_crops["jacket"][0])
+if "pants" in class_crops and len(class_crops["pants"]) > 0:
+    display(class_crops["pants"][0])
 """),
     md_cell("""## 6. Summary & Key Takeaways
 - **SAM 3.1 Architecture**: Utilizes `facebook/sam2.1-hiera-small` for fast, state-of-the-art segmentation.
