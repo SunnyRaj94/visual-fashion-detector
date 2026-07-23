@@ -1,7 +1,10 @@
 import os
 import yaml
 from typing import Any, Dict, List, Optional
+from dotenv import load_dotenv
 from fashion_detector.logging import logger
+
+load_dotenv()
 
 DEFAULT_CATEGORIES = {
     "clothing": [
