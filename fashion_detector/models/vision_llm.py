@@ -2,33 +2,95 @@ import io
 import os
 import json
 import base64
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 from PIL import Image
 import litellm
+from dotenv import load_dotenv
+
+load_dotenv()
 from pydantic import BaseModel, Field, field_validator
 from fashion_detector.models.base import BaseDetector, Detection
 from fashion_detector.logging import logger, time_it
 
-DETECTION_PROMPT_TEMPLATE = """You are an expert fashion AI visual search system.
-Detect all fashion items (clothing, accessories, shoes) worn by people or present in this image.
-Do not detect people, only detect the fashion items themselves.
+DETECTION_PROMPT_TEMPLATE = """
+You are an expert fashion AI visual search system.
+# Task: Detect all fashion items (clothing, accessories, shoes) worn by people or present in the image.
 
-For each detected fashion item, provide:
-1. "label": The specific category name, which MUST be selected from the Allowed Categories list below.
-2. "box_2d": The bounding box coordinates as [ymin, xmin, ymax, xmax] normalized on a 0 to 1000 scale.
-   (0,0 is the top-left and 1000,1000 is the bottom-right corner of the image. For example, [ymin, xmin, ymax, xmax] coordinates. Scale 0 is the top/left edge, 1000 is the bottom/right edge).
-3. "score": Estimate a confidence score from 0.0 to 1.0.
+# Constraints:
+1. Detect ONLY fashion products. Never detect people, faces, body parts, hair, hands, or any non-fashion objects.
+2. Detect only fashion items that are clearly visible and at least 50% visible. Ignore heavily occluded, blurry, or unrecognizable items.
+3. The closest and most visually prominent foreground fashion items are mandatory detections. Never omit a large, clearly visible fashion item that appears closest to the camera.
+4. Detect every visible instance separately. If multiple people are wearing the same product category, return a separate detection for each physical item.
+5. Return one tight bounding box for each detected fashion item. The bounding box should tightly enclose only the visible portion of the product and should not include unnecessary background or neighboring items.
+6. Do NOT return duplicate detections for the same physical fashion item.
+7. If you are uncertain about a product category or the item is not clearly visible, do NOT return a detection.
 
-Allowed Categories:
-{categories}
+# For each detected fashion item, provide an object with exactly these keys:
+1. "label": The specific category name. It MUST be selected strictly from the 'Allowed Categories' list below. Do not hallucinate categories not in the list.
+2. "box_2d": An array of 4 numbers [ymin, xmin, ymax, xmax] normalized on a 0 to 1000 scale.
+   - Scale: (0,0) is top-left, (1000,1000) is bottom-right.
+   - Format: Ensure numbers are integers or floats. Do not include coordinate names like "y1".
+3. "score": A float between 0.0 and 1.0 representing confidence.
 
-Your output MUST be a valid JSON array of objects and NOTHING ELSE. Do not include markdown formatting like ```json or ```. Return only the raw JSON string.
+# Confidence Score
+Assign a floating-point score between 0.0 and 1.0 based on how visually prominent the fashion item is in the image.
 
-Example Output format:
-[
-  {{"label": "jacket", "box_2d": [100, 200, 800, 900], "score": 0.95}},
-  {{"label": "sneakers", "box_2d": [850, 400, 990, 600], "score": 0.88}}
-]"""
+The score should consider:
+- Visibility (how much of the item is visible)
+- Size relative to the image
+- Distance to the camera (foreground vs. background)
+- Occlusion
+- Image clarity
+
+Scoring Guidelines:
+1.00
+- Largest and most visually dominant fashion item in the image.
+- Nearly or completely visible (>90%).
+- Closest to the camera.
+
+0.80 - 0.99
+- Large and clearly visible.
+- Mostly unobstructed (>70% visible).
+- One of the primary fashion items in the image.
+
+0.50 - 0.79
+- Medium-sized item.
+- Partially visible (50–70%).
+- Background or moderately occluded.
+
+0.30 - 0.49
+- Small or distant item.
+- Barely satisfies the 50% visibility requirement.
+- Not visually prominent.
+
+0.00 - 0.29
+- Do NOT use this range.
+- Items with less than 50% visibility or extremely small, blurry, or heavily occluded should NOT be returned.
+
+
+# Allowed Categories:
+<<categories>>
+
+# Critical Formatting Rules:
+- Output MUST be a single block of raw text starting with '[' and ending with ']').
+- Ensure valid JSON syntax (escape quotes if necessary, use commas between items, no trailing commas).
+- If no items are detected, return an empty array: []
+
+Example Output (Raw JSON):
+[{
+    "label": "jacket",
+    "box_2d": [100, 200, 800, 900],
+    "score": 0.95
+},
+{
+    "label": "sneakers",
+    "box_2d": [850, 400, 990, 600],
+    "score": 0.88
+}]
+
+Return your Json output now.
+"""
+
 
 CLASSIFICATION_PROMPT_TEMPLATE = """You are an expert fashion AI visual search classifier.
 Analyze the image and identify all fashion items (clothing, accessories, shoes) worn by people or present in this image.
@@ -84,13 +146,55 @@ class VisionLlmDetector(BaseDetector):
 
     def __init__(self, config: Any):
         super().__init__(config)
-        self.model_name = config.models.get("vision_llm", {}).get(
-            "name", "gemini/gemini-1.5-flash"
+        vision_cfg = config.models.get("vision_llm", {})
+        self.provider = vision_cfg.get("provider", None)
+        raw_model_name = (
+            vision_cfg.get("model")
+            or vision_cfg.get("name")
+            or "gemini/gemini-1.5-flash"
         )
-        self.temperature = config.models.get("vision_llm", {}).get("temperature", 0.0)
-        self.max_tokens = config.models.get("vision_llm", {}).get("max_tokens", 1000)
-        self.api_key = config.models.get("vision_llm", {}).get("api_key", None)
-        self.api_base = config.models.get("vision_llm", {}).get("api_base", None)
+        if (
+            self.provider
+            and not raw_model_name.startswith(f"{self.provider}/")
+            and not raw_model_name.startswith("openai/")
+        ):
+            self.model_name = f"{self.provider}/{raw_model_name}"
+        else:
+            self.model_name = raw_model_name
+
+        self.temperature = vision_cfg.get("temperature", 0.0)
+        self.max_tokens = vision_cfg.get("max_tokens", 1000)
+        self.api_key_env = vision_cfg.get("api_key_env", None)
+        self.api_key = vision_cfg.get("api_key", None)
+        self.api_base = vision_cfg.get("api_base", None)
+
+    def _get_api_key(self, kwargs: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        kwargs = kwargs or {}
+        if kwargs.get("api_key"):
+            return kwargs["api_key"]
+
+        if self.api_key_env:
+            env_val = os.getenv(self.api_key_env)
+            if env_val:
+                return env_val
+
+        if self.api_key:
+            if (
+                isinstance(self.api_key, str)
+                and self.api_key.startswith("${")
+                and self.api_key.endswith("}")
+            ):
+                env_name = self.api_key[2:-1].strip()
+                env_val = os.getenv(env_name)
+                if env_val:
+                    return env_val
+            return (
+                os.path.expandvars(self.api_key)
+                if isinstance(self.api_key, str)
+                else self.api_key
+            )
+
+        return None
 
     def load_model(self) -> None:
         """Vision LLMs are queried via API, so no weights are loaded locally."""
@@ -123,7 +227,7 @@ class VisionLlmDetector(BaseDetector):
         width, height = image.size
         base64_image = self._encode_image_to_base64(image)
 
-        prompt = DETECTION_PROMPT_TEMPLATE.format(categories=categories)
+        prompt = DETECTION_PROMPT_TEMPLATE.replace("<<categories>>", str(categories))
 
         messages = [
             {
@@ -138,10 +242,15 @@ class VisionLlmDetector(BaseDetector):
             }
         ]
 
-        api_key_to_use = kwargs.get("api_key", self.api_key)
+        api_key_to_use = self._get_api_key(kwargs)
         api_base_to_use = kwargs.get("api_base", self.api_base)
 
-        if api_base_to_use and not model_to_use.startswith("openai/"):
+        if (
+            api_base_to_use
+            and not model_to_use.startswith("openai/")
+            and not model_to_use.startswith("openrouter/")
+            and self.provider is None
+        ):
             model_to_use = f"openai/{model_to_use}"
 
         # Gather completion parameters
@@ -164,7 +273,7 @@ class VisionLlmDetector(BaseDetector):
             response_text = response.choices[0].message.content.strip()
 
             # Always log raw_response for debugging
-            logger.debug(f"Raw response from Vision LLM: {response_text}")
+            logger.info(f"Raw response from Vision LLM: \n{response_text}\n")
 
             # Clean up potential markdown formatting wrapping the JSON
             if response_text.startswith("```"):
@@ -264,11 +373,8 @@ class VisionLlmDetector(BaseDetector):
         ]
 
         model_to_use = self.model_name
-        api_key_to_use = self.api_key
+        api_key_to_use = self._get_api_key()
         api_base_to_use = self.api_base
-
-        if api_base_to_use and not model_to_use.startswith("openai/"):
-            model_to_use = f"openai/{model_to_use}"
 
         completion_kwargs = {
             "model": model_to_use,
