@@ -2,6 +2,8 @@
 .venv/
 venv/
 ENV/
+*/.venv/*
+*.egg-info
 
 # Python Cache & Eggs
 __pycache__/
