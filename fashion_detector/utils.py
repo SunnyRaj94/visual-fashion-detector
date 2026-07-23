@@ -66,7 +66,8 @@ CATEGORY_MAPPING = {
     "rings": "jewelry",
     "brooches": "jewelry",
 }
-user_categories = list(CATEGORY_MAPPING.values())
+user_categories = list(set(CATEGORY_MAPPING.keys()))
+mapped_user_categories = list(set(CATEGORY_MAPPING.values()))
 
 
 def clean_categories(raw_detected_categories: List[str]) -> List[str]:
@@ -547,7 +548,11 @@ def visualize_detections(
 
 
 def display_imageGrid(
-    images: List[Image.Image], imgs_per_row: int = 3, max_width: int = 15
+    images: List[Image.Image],
+    imgs_per_row: int = 3,
+    max_width: int = 15,
+    border_color: str = "#cccccc",
+    border_width: float = 1.5,
 ) -> None:
     """
     Displays a list of PIL Images in a grid layout inside a Jupyter Notebook cell.
@@ -556,6 +561,8 @@ def display_imageGrid(
         images: List of PIL.Image.Image instances to display.
         imgs_per_row: Number of images per row (e.g., 2 or 3).
         max_width: Maximum width of the entire figure layout in inches.
+        border_color: Color of the bounding border around each image (default: '#cccccc').
+        border_width: Line width of the bounding border in points (default: 1.5).
 
     Raises:
         TypeError: If input validation fails for types or structures.
@@ -609,7 +616,18 @@ def display_imageGrid(
         if i < num_images:
             # Display image data arrays safely
             axes[i].imshow(images[i])
-            axes[i].axis("off")  # Suppress pixel position coordinate ticks
+            axes[i].set_xticks([])
+            axes[i].set_yticks([])
+            axes[i].tick_params(
+                left=False, bottom=False, labelleft=False, labelbottom=False
+            )
+            if border_width > 0:
+                for spine in axes[i].spines.values():
+                    spine.set_visible(True)
+                    spine.set_color(border_color)
+                    spine.set_linewidth(border_width)
+            else:
+                axes[i].axis("off")
         else:
             # Hide leftover empty subplot containers in the final grid row
             axes[i].set_visible(False)
