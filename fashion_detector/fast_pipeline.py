@@ -129,12 +129,12 @@ class FastFashionPipeline:
     def __init__(
         self,
         config: Optional[Config] = None,
-        box_threshold: float = 0.20,
-        text_threshold: float = 0.20,
+        box_threshold: float = 0.25,
+        text_threshold: float = 0.25,
         min_score_threshold: float = 0.20,
         max_detection_size: int = 640,
         sam_model_name: str = "facebook/sam2.1-hiera-small",
-        use_broad_category_batches: bool = False,
+        use_broad_category_batches: bool = True,
     ):
         self.config = config or Config()
         self.box_threshold = box_threshold
@@ -390,25 +390,17 @@ class FastFashionPipeline:
                 )
 
         # Apply post-classification NMS & Containment Filtering to eliminate outer group boxes
-        return self._apply_containment_nms(
-            final_objects,
-            image_size=image.size,
-            iou_threshold=0.45,
-            ioa_threshold=0.75,
-        )
+        return self._apply_containment_nms(final_objects, iou_threshold=0.45, ioa_threshold=0.80)
 
     @staticmethod
     def _apply_containment_nms(
         objects: List[DetectedFashionObject],
-        image_size: Tuple[int, int] = (800, 600),
         iou_threshold: float = 0.45,
-        ioa_threshold: float = 0.75,
+        ioa_threshold: float = 0.80,
     ) -> List[DetectedFashionObject]:
-        """Applies IoU, IoA containment, and image coverage filtering to eliminate giant outer group boxes."""
+        """Applies IoU and Intersection-over-Area (IoA) containment filtering to eliminate giant outer group boxes."""
         if not objects:
             return []
-
-        img_area = float(image_size[0] * image_size[1])
 
         # Sort objects by score descending
         sorted_objs = sorted(objects, key=lambda o: o.score, reverse=True)
@@ -417,13 +409,7 @@ class FastFashionPipeline:
         for obj in sorted_objs:
             box_a = obj.box
             area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
-            cov_a = area_a / img_area if img_area > 0 else 0.0
             drop = False
-
-            # If a box covers > 60% of the total image area AND other smaller item boxes exist, drop the giant container box
-            if cov_a > 0.60 and len(sorted_objs) > 1:
-                logger.info(f"Filtering giant container box covering {cov_a*100:.1f}% of image: label='{obj.label}'")
-                continue
 
             for kept in kept_objs:
                 box_b = kept.box
@@ -441,8 +427,8 @@ class FastFashionPipeline:
                 min_area = min(area_a, area_b)
                 ioa = inter / min_area if min_area > 0 else 0.0
 
-                # Drop if high IoU or high containment overlap
-                if iou > iou_threshold or ioa > ioa_threshold:
+                # Drop if high IoU or if one box almost completely encloses another (IoA > 0.80)
+                if iou > iou_threshold or (ioa > ioa_threshold and area_a > 1.4 * area_b):
                     drop = True
                     break
 
