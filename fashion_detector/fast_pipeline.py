@@ -20,7 +20,6 @@ from fashion_detector.utils import (
     generate_interactive_html,
 )
 
-
 NEGATIVE_CLASSES = ["human face", "skin", "hair", "background", "nothing"]
 
 
@@ -241,7 +240,12 @@ class FastFashionPipeline:
                     p.metadata["broad_category"] = "Footwear"
                 elif "bag" in label_lower:
                     p.metadata["broad_category"] = "Bags"
-                elif "accessor" in label_lower or "watch" in label_lower or "hat" in label_lower or "belt" in label_lower:
+                elif (
+                    "accessor" in label_lower
+                    or "watch" in label_lower
+                    or "hat" in label_lower
+                    or "belt" in label_lower
+                ):
                     p.metadata["broad_category"] = "Accessories"
                 else:
                     p.metadata["broad_category"] = "Clothing"
@@ -384,7 +388,11 @@ class FastFashionPipeline:
                     continue
 
                 derived_broad, subcat = get_parent_taxonomy_for_fine(verified_label)
-                final_broad = derived_broad if derived_broad != "Clothing" or broad_cat == "Clothing" else broad_cat
+                final_broad = (
+                    derived_broad
+                    if derived_broad != "Clothing" or broad_cat == "Clothing"
+                    else broad_cat
+                )
 
                 final_objects.append(
                     DetectedFashionObject(
@@ -394,7 +402,9 @@ class FastFashionPipeline:
                         score=float(det.score),
                         box=obj["box"],
                         mask=obj["mask"],
-                        image=obj["segmented_image"],  # Transparent PIL RGBA Image object
+                        image=obj[
+                            "segmented_image"
+                        ],  # Transparent PIL RGBA Image object
                         metadata={
                             "proposal_label": obj["label"],
                             "proposal_score": float(obj["score"]),
@@ -404,7 +414,9 @@ class FastFashionPipeline:
                 )
 
         # Apply post-classification NMS & Containment Filtering to eliminate outer group boxes
-        return self._apply_containment_nms(final_objects, iou_threshold=0.45, ioa_threshold=0.80)
+        return self._apply_containment_nms(
+            final_objects, iou_threshold=0.45, ioa_threshold=0.80
+        )
 
     @staticmethod
     def _apply_containment_nms(
@@ -442,7 +454,9 @@ class FastFashionPipeline:
                 ioa = inter / min_area if min_area > 0 else 0.0
 
                 # Drop if high IoU or if one box almost completely encloses another (IoA > 0.80)
-                if iou > iou_threshold or (ioa > ioa_threshold and area_a > 1.4 * area_b):
+                if iou > iou_threshold or (
+                    ioa > ioa_threshold and area_a > 1.4 * area_b
+                ):
                     drop = True
                     break
 
@@ -523,4 +537,3 @@ class FastFashionPipeline:
             annotated_image=annotated_img,
             interactive_html=html_str,
         )
-

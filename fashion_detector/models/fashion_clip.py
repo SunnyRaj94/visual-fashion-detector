@@ -92,7 +92,9 @@ class FashionClipDetector(BaseDetector):
 
             # Average across templates and normalize final vector per category
             mean_embeddings = text_features.mean(dim=1)
-            mean_embeddings = mean_embeddings / mean_embeddings.norm(dim=-1, keepdim=True)
+            mean_embeddings = mean_embeddings / mean_embeddings.norm(
+                dim=-1, keepdim=True
+            )
 
         self.text_features_cache[cache_key] = mean_embeddings
         return mean_embeddings

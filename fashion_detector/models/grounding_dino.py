@@ -80,9 +80,9 @@ class GroundingDinoDetector(BaseDetector):
             proc_image = image
 
         # Prepare inputs
-        inputs = self.processor(images=proc_image, text=query_str, return_tensors="pt").to(
-            self.device
-        )
+        inputs = self.processor(
+            images=proc_image, text=query_str, return_tensors="pt"
+        ).to(self.device)
 
         # Run inference in 16-bit autocast mode
         device_str = str(self.device).lower()
