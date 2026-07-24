@@ -132,6 +132,7 @@ class FastBoxFashionPipeline:
         box_threshold: float = 0.25,
         text_threshold: float = 0.25,
         min_score_threshold: float = 0.20,
+        min_box_area_ratio: float = 0.02,
         max_detection_size: int = 640,
         use_broad_category_batches: bool = True,
     ):
@@ -139,6 +140,7 @@ class FastBoxFashionPipeline:
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
         self.min_score_threshold = min_score_threshold
+        self.min_box_area_ratio = min_box_area_ratio
         self.max_detection_size = max_detection_size
         self.use_broad_category_batches = use_broad_category_batches
 
@@ -327,6 +329,9 @@ class FastBoxFashionPipeline:
                 categories=candidate_cats,
             )
 
+            img_w, img_h = image.size
+            img_area = float(img_w * img_h)
+
             for obj, det in zip(group_objs, classified_detections):
                 verified_label = det.label
 
@@ -337,6 +342,15 @@ class FastBoxFashionPipeline:
                 ):
                     logger.info(
                         f"Filtering false positive / low score object: '{verified_label}' (score={det.score:.2f})"
+                    )
+                    continue
+
+                # Filter out small boxes below minimum image area ratio
+                box = obj["box"]
+                box_area = (box[2] - box[0]) * (box[3] - box[1])
+                if img_area > 0 and (box_area / img_area) < self.min_box_area_ratio:
+                    logger.info(
+                        f"Filtering small box covering {(box_area/img_area)*100:.2f}% of image (<{self.min_box_area_ratio*100:.1f}%): label='{verified_label}'"
                     )
                     continue
 
