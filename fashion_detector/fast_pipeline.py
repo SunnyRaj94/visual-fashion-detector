@@ -9,8 +9,7 @@ from fashion_detector.config import Config
 from fashion_detector.logging import logger, time_it
 from fashion_detector.models.base import Detection
 from fashion_detector.models.grounding_dino import GroundingDinoDetector
-from fashion_detector.models.sam import SamDetector
-from fashion_detector.models.sam3_segmenter import Sam2Detector
+from fashion_detector.models.sam3_segmenter import Sam2Detector, SamSegmenter
 from fashion_detector.models.fashion_clip import FashionClipDetector
 from fashion_detector.utils import (
     CATEGORY_HIERARCHY,
@@ -90,7 +89,7 @@ class FastFashionPipeline:
     Pipeline Architecture:
     1. Grounding DINO: Detects candidate bounding boxes using batched broad category prompts.
     2. NMS & Filtering: Merges overlapping region proposals.
-    3. SAM 2: Batch box-prompted instance segmentation in a single forward pass.
+    3. SAM 2 (Sam2Detector / sam3_segmenter.py): Batch box-prompted instance segmentation in a single forward pass.
     4. FashionCLIP: Fast batch crop verification and fine-grained classification.
     """
 
@@ -112,9 +111,9 @@ class FastFashionPipeline:
             self.config.models["sam"] = {}
         self.config.models["sam"]["name"] = sam_model_name
 
-        # Initialize detector components
+        # Initialize detector components using sam3_segmenter.py classes
         self.dino = GroundingDinoDetector(self.config)
-        self.sam2 = SamDetector(self.config)
+        self.sam2 = Sam2Detector(self.config)
         self.fashion_clip = FashionClipDetector(self.config)
 
     def load_models(self) -> None:
@@ -209,22 +208,41 @@ class FastFashionPipeline:
     def _segment_boxes_batch(
         self, image: Image.Image, proposals: List[Detection]
     ) -> List[Dict[str, Any]]:
-        """Passes all candidate boxes to SAM 2 in a single batch pass for instant segmentation."""
+        """Passes all candidate boxes to Sam2Detector (from sam3_segmenter.py) for instant batch segmentation."""
         if not proposals:
             return []
 
-        boxes = [prop.box for prop in proposals]
-        labels = [prop.label for prop in proposals]
+        # Call extract_segmented_parts directly from Sam2Detector in sam3_segmenter.py
+        cutouts = self.sam2.extract_segmented_parts(image, box_inputs=proposals)
 
-        # Single batched forward pass in SAM2
-        sam_detections = self.sam2.detect(
-            image, input_boxes=boxes, queries=labels
-        )
+        segmented_objects = []
+        for prop, cutout in zip(proposals, cutouts):
+            # Extract binary mask array from alpha channel of transparent RGBA cutout
+            cutout_np = np.array(cutout)
+            alpha_channel = cutout_np[:, :, 3] if cutout_np.ndim == 3 and cutout_np.shape[2] == 4 else cutout_np > 0
+            mask_np = alpha_channel > 0
 
-        # Extract isolated transparent cutouts (RGBA PIL Images)
-        segmented_objects = self.sam2.extract_segmented_objects(
-            image, detections=sam_detections, crop_to_box=True, transparent_bg=True
-        )
+            # Crop transparent cutout image to candidate bounding box with padding
+            xmin, ymin, xmax, ymax = map(int, prop.box)
+            w, h = cutout.size
+            crop_xmin = max(0, xmin - 5)
+            crop_ymin = max(0, ymin - 5)
+            crop_xmax = min(w, xmax + 5)
+            crop_ymax = min(h, ymax + 5)
+
+            cropped_cutout = cutout
+            if crop_xmax > crop_xmin and crop_ymax > crop_ymin:
+                cropped_cutout = cutout.crop((crop_xmin, crop_ymin, crop_xmax, crop_ymax))
+
+            segmented_objects.append(
+                {
+                    "label": prop.label,
+                    "score": prop.score,
+                    "box": prop.box,
+                    "segmented_image": cropped_cutout,
+                    "mask": mask_np,
+                }
+            )
 
         return segmented_objects
 
