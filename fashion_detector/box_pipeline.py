@@ -132,7 +132,7 @@ class FastBoxFashionPipeline:
         box_threshold: float = 0.25,
         text_threshold: float = 0.25,
         min_score_threshold: float = 0.20,
-        min_box_area_ratio: float = 0.02,
+        min_box_area_ratio: float = 0.05,
         max_detection_size: int = 640,
         use_broad_category_batches: bool = True,
     ):
@@ -228,7 +228,12 @@ class FastBoxFashionPipeline:
                     p.metadata["broad_category"] = "Footwear"
                 elif "bag" in label_lower:
                     p.metadata["broad_category"] = "Bags"
-                elif "accessor" in label_lower or "watch" in label_lower or "hat" in label_lower or "belt" in label_lower:
+                elif (
+                    "accessor" in label_lower
+                    or "watch" in label_lower
+                    or "hat" in label_lower
+                    or "belt" in label_lower
+                ):
                     p.metadata["broad_category"] = "Accessories"
                 else:
                     p.metadata["broad_category"] = "Clothing"
@@ -355,7 +360,11 @@ class FastBoxFashionPipeline:
                     continue
 
                 derived_broad, subcat = get_parent_taxonomy_for_fine(verified_label)
-                final_broad = derived_broad if derived_broad != "Clothing" or broad_cat == "Clothing" else broad_cat
+                final_broad = (
+                    derived_broad
+                    if derived_broad != "Clothing" or broad_cat == "Clothing"
+                    else broad_cat
+                )
 
                 final_objects.append(
                     DetectedBoxObject(
@@ -375,7 +384,9 @@ class FastBoxFashionPipeline:
                 )
 
         # Apply post-classification NMS & Containment Filtering to eliminate outer group boxes
-        return self._apply_containment_nms(final_objects, iou_threshold=0.45, ioa_threshold=0.80)
+        return self._apply_containment_nms(
+            final_objects, iou_threshold=0.45, ioa_threshold=0.80
+        )
 
     @staticmethod
     def _apply_containment_nms(
@@ -413,7 +424,9 @@ class FastBoxFashionPipeline:
                 ioa = inter / min_area if min_area > 0 else 0.0
 
                 # Drop if high IoU or if one box almost completely encloses another (IoA > 0.80)
-                if iou > iou_threshold or (ioa > ioa_threshold and area_a > 1.4 * area_b):
+                if iou > iou_threshold or (
+                    ioa > ioa_threshold and area_a > 1.4 * area_b
+                ):
                     drop = True
                     break
 
@@ -472,7 +485,11 @@ class FastBoxFashionPipeline:
             candidate_objects = []
             for prop, cutout in zip(proposals, cutouts):
                 cutout_np = np.array(cutout)
-                alpha_channel = cutout_np[:, :, 3] if cutout_np.ndim == 3 and cutout_np.shape[2] == 4 else cutout_np > 0
+                alpha_channel = (
+                    cutout_np[:, :, 3]
+                    if cutout_np.ndim == 3 and cutout_np.shape[2] == 4
+                    else cutout_np > 0
+                )
                 mask_np = alpha_channel > 0
                 candidate_objects.append(
                     {
@@ -481,7 +498,9 @@ class FastBoxFashionPipeline:
                         "box": prop.box,
                         "crop_image": cutout,
                         "mask": mask_np,
-                        "broad_category": prop.metadata.get("broad_category", "Clothing"),
+                        "broad_category": prop.metadata.get(
+                            "broad_category", "Clothing"
+                        ),
                     }
                 )
         else:
