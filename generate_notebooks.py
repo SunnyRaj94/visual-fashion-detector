@@ -725,7 +725,8 @@ detector.load_model()
 Supply candidate bounding boxes `[xmin, ymin, xmax, ymax]` and target category queries to SAM.
 SAM refines the bounding box boundaries and extracts pixel-level binary masks.
 """),
-    code_cell("""image_path = "image.png" if os.path.exists("image.png") else "data/fashion_model_street.jpg"
+    code_cell(
+        """image_path = "image.png" if os.path.exists("image.png") else "data/fashion_model_street.jpg"
 image = load_image(image_path)
 w, h = image.size
 
@@ -743,7 +744,8 @@ print(f"SAM Box-Prompted Detections: {len(detections)}")
 for det in detections:
     mask_str = f"shape={det.mask.shape}" if det.mask is not None else "None"
     print(f"- Label: '{det.label}', Score: {det.score:.3f}, Box: {list(map(int, det.box))}, Mask: {mask_str}")
-"""),
+"""
+    ),
     md_cell("""## 2. Render Interactive Visualization
 Render an interactive HTML overlay displaying SAM bounding boxes and labels.
 """),
@@ -828,4 +830,3 @@ create_notebook("11_comparative_evaluation.ipynb", nb11_cells)
 create_notebook("12_final_recommendations.ipynb", nb12_cells)
 create_notebook("14_sam_detection_experiments.ipynb", nb14_cells)
 print("All notebooks created successfully!")
-

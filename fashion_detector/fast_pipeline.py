@@ -33,8 +33,12 @@ class DetectedFashionObject(BaseModel):
     subcategory: str = Field(
         description="Subcategory grouping (e.g. Dresses, Tops, Sneakers, Tote)"
     )
-    score: float = Field(description="Final confidence score from FashionCLIP verification")
-    box: List[float] = Field(description="Bounding box [xmin, ymin, xmax, ymax] in pixels")
+    score: float = Field(
+        description="Final confidence score from FashionCLIP verification"
+    )
+    box: List[float] = Field(
+        description="Bounding box [xmin, ymin, xmax, ymax] in pixels"
+    )
     mask: Optional[np.ndarray] = Field(
         default=None, description="Binary segmentation mask numpy array"
     )
@@ -55,16 +59,23 @@ class FastFashionPipelineResult(BaseModel):
         description="List of detected fashion objects with masks and transparent RGBA images"
     )
     total_objects: int = Field(description="Total count of detected objects")
-    processing_time_ms: float = Field(description="Total pipeline execution latency in ms")
-    image_size: Tuple[int, int] = Field(description="Original image dimensions (width, height)")
+    processing_time_ms: float = Field(
+        description="Total pipeline execution latency in ms"
+    )
+    image_size: Tuple[int, int] = Field(
+        description="Original image dimensions (width, height)"
+    )
     processed_image: Optional[Image.Image] = Field(
-        default=None, description="The loaded RGB PIL Image object processed by the pipeline"
+        default=None,
+        description="The loaded RGB PIL Image object processed by the pipeline",
     )
     annotated_image: Optional[Image.Image] = Field(
-        default=None, description="PIL Image object with bounding boxes and labels drawn on top"
+        default=None,
+        description="PIL Image object with bounding boxes and labels drawn on top",
     )
     interactive_html: Optional[str] = Field(
-        default=None, description="Interactive HTML visualization snippet ready for Jupyter/web"
+        default=None,
+        description="Interactive HTML visualization snippet ready for Jupyter/web",
     )
 
     def visualize(self, mode: str = "interactive"):
@@ -118,7 +129,9 @@ class FastFashionPipeline:
 
     def load_models(self) -> None:
         """Preloads all pipeline models to warm up memory and GPU caches."""
-        logger.info("Warming up fast pipeline models (Grounding DINO, SAM2, FashionCLIP)...")
+        logger.info(
+            "Warming up fast pipeline models (Grounding DINO, SAM2, FashionCLIP)..."
+        )
         self.dino.load_model()
         self.sam2.load_model()
         self.fashion_clip.load_model()
@@ -219,7 +232,11 @@ class FastFashionPipeline:
         for prop, cutout in zip(proposals, cutouts):
             # Extract binary mask array from alpha channel of transparent RGBA cutout
             cutout_np = np.array(cutout)
-            alpha_channel = cutout_np[:, :, 3] if cutout_np.ndim == 3 and cutout_np.shape[2] == 4 else cutout_np > 0
+            alpha_channel = (
+                cutout_np[:, :, 3]
+                if cutout_np.ndim == 3 and cutout_np.shape[2] == 4
+                else cutout_np > 0
+            )
             mask_np = alpha_channel > 0
 
             # Crop transparent cutout image to candidate bounding box with padding
@@ -232,7 +249,9 @@ class FastFashionPipeline:
 
             cropped_cutout = cutout
             if crop_xmax > crop_xmin and crop_ymax > crop_ymin:
-                cropped_cutout = cutout.crop((crop_xmin, crop_ymin, crop_xmax, crop_ymax))
+                cropped_cutout = cutout.crop(
+                    (crop_xmin, crop_ymin, crop_xmax, crop_ymax)
+                )
 
             segmented_objects.append(
                 {
@@ -304,7 +323,9 @@ class FastFashionPipeline:
 
         return final_objects
 
-    def process(self, image_input: Union[str, Image.Image]) -> FastFashionPipelineResult:
+    def process(
+        self, image_input: Union[str, Image.Image]
+    ) -> FastFashionPipelineResult:
         """Executes the complete high-speed fashion detection and segmentation pipeline.
 
         Args:
