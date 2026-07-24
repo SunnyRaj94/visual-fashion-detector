@@ -49,7 +49,14 @@ class Sam2Detector(BaseDetector):
 
         orig_image = image.convert("RGB")
         target_size = orig_image.size[::-1]  # (Height, Width)
-        converted_boxes = [b["box"] for b in box_inputs]
+        converted_boxes = [
+            (
+                b["box"]
+                if isinstance(b, dict) and "box" in b
+                else (b.box if hasattr(b, "box") else b)
+            )
+            for b in box_inputs
+        ]
 
         inputs = self.processor(
             images=orig_image, input_boxes=[converted_boxes], return_tensors="pt"
@@ -109,7 +116,14 @@ class Sam2Detector(BaseDetector):
 
         orig_image = image.convert("RGB")
         target_size = orig_image.size[::-1]
-        converted_boxes = [b["box"] for b in box_inputs]
+        converted_boxes = [
+            (
+                b["box"]
+                if isinstance(b, dict) and "box" in b
+                else (b.box if hasattr(b, "box") else b)
+            )
+            for b in box_inputs
+        ]
 
         inputs = self.processor(
             images=orig_image, input_boxes=[converted_boxes], return_tensors="pt"
@@ -204,6 +218,185 @@ class Sam3Detector(BaseDetector):
         self.model.eval()
         logger.info("SAM 3 model is now ready for inference.")
 
+    def _match_masks_to_boxes(
+        self,
+        pred_masks: torch.Tensor,
+        converted_boxes: List[List[float]],
+        orig_h: int,
+        orig_w: int,
+    ) -> List[np.ndarray]:
+        """Matches SAM 3 candidate prediction masks 1-to-1 to each input box based on spatial overlap."""
+        masks_interpolated = torch.nn.functional.interpolate(
+            pred_masks,
+            size=(orig_h, orig_w),
+            mode="bilinear",
+            align_corners=False,
+        )[0]
+
+        extracted_masks = []
+        for box in converted_boxes:
+            ymin, xmin, ymax, xmax = map(int, box)
+            ymin_cl = max(0, min(orig_h, ymin))
+            ymax_cl = max(0, min(orig_h, ymax))
+            xmin_cl = max(0, min(orig_w, xmin))
+            xmax_cl = max(0, min(orig_w, xmax))
+
+            box_crop = masks_interpolated[:, ymin_cl:ymax_cl, xmin_cl:xmax_cl]
+            if box_crop.numel() > 0:
+                scores = box_crop.mean(dim=(-2, -1))
+            else:
+                scores = masks_interpolated.mean(dim=(-2, -1))
+
+            best_idx = torch.argmax(scores).item()
+            binary_mask = (masks_interpolated[best_idx] > 0.0).cpu().numpy()
+            extracted_masks.append(binary_mask)
+
+        return extracted_masks
+
+    @time_it("sam3_box_segmentation")
+    def segment_with_boxes(
+        self,
+        image: Image.Image,
+        box_inputs: List[Dict[str, Any]],
+        labels: Optional[List[str]] = None,
+    ) -> Image.Image:
+        """Segments image using geometric box tracking configurations and concept labels for each box area."""
+        if self.model is None or self.processor is None:
+            self.load_model()
+
+        orig_image = image.convert("RGB")
+        orig_w, orig_h = orig_image.size
+        img_np = np.array(orig_image)
+        color_layer = np.zeros_like(img_np)
+
+        for idx, item in enumerate(box_inputs):
+            box = (
+                item["box"]
+                if isinstance(item, dict) and "box" in item
+                else (
+                    item.box
+                    if hasattr(item, "box")
+                    else (
+                        item[0]
+                        if isinstance(item, (list, tuple)) and len(item) == 2
+                        else item
+                    )
+                )
+            )
+            label = (
+                item["label"]
+                if isinstance(item, dict) and "label" in item
+                else (
+                    item.label
+                    if hasattr(item, "label")
+                    else (
+                        item[1]
+                        if isinstance(item, (list, tuple)) and len(item) == 2
+                        else (
+                            labels[idx]
+                            if labels and idx < len(labels)
+                            else "fashion item"
+                        )
+                    )
+                )
+            )
+
+            ymin, xmin, ymax, xmax = map(int, box)
+            ymin_cl, ymax_cl = max(0, min(orig_h, ymin)), max(0, min(orig_h, ymax))
+            xmin_cl, xmax_cl = max(0, min(orig_w, xmin)), max(0, min(orig_w, xmax))
+
+            if ymax_cl > ymin_cl and xmax_cl > xmin_cl:
+                crop_img = orig_image.crop((xmin_cl, ymin_cl, xmax_cl, ymax_cl))
+                concept_cutouts = self.extract_concept_parts(crop_img, [label])
+                if concept_cutouts:
+                    cutout_np = np.array(concept_cutouts[0])
+                    alpha_mask = cutout_np[:, :, 3] > 0
+                else:
+                    alpha_mask = np.ones(
+                        (ymax_cl - ymin_cl, xmax_cl - xmin_cl), dtype=bool
+                    )
+
+                color = np.array(
+                    [
+                        (idx * 75 + 60) % 255,
+                        (idx * 145 + 30) % 255,
+                        (255 - (idx * 40)) % 255,
+                    ],
+                    dtype=np.uint8,
+                )
+                color_layer[ymin_cl:ymax_cl, xmin_cl:xmax_cl][alpha_mask] = color
+
+        blended_np = np.where(
+            color_layer > 0, (img_np * 0.4 + color_layer * 0.6).astype(np.uint8), img_np
+        )
+        return Image.fromarray(blended_np)
+
+    @time_it("sam3_box_extraction")
+    def extract_segmented_parts(
+        self,
+        image: Image.Image,
+        box_inputs: List[Dict[str, Any]],
+        labels: Optional[List[str]] = None,
+    ) -> List[Image.Image]:
+        """Extracts segmented instances as clean transparent alpha PNGs for each of the N input box+label pairs."""
+        if self.model is None or self.processor is None:
+            self.load_model()
+
+        orig_image = image.convert("RGB")
+        orig_w, orig_h = orig_image.size
+        extracted_cutouts = []
+
+        for idx, item in enumerate(box_inputs):
+            box = (
+                item["box"]
+                if isinstance(item, dict) and "box" in item
+                else (
+                    item.box
+                    if hasattr(item, "box")
+                    else (
+                        item[0]
+                        if isinstance(item, (list, tuple)) and len(item) == 2
+                        else item
+                    )
+                )
+            )
+            label = (
+                item["label"]
+                if isinstance(item, dict) and "label" in item
+                else (
+                    item.label
+                    if hasattr(item, "label")
+                    else (
+                        item[1]
+                        if isinstance(item, (list, tuple)) and len(item) == 2
+                        else (
+                            labels[idx]
+                            if labels and idx < len(labels)
+                            else "fashion item"
+                        )
+                    )
+                )
+            )
+
+            ymin, xmin, ymax, xmax = map(int, box)
+            ymin_cl, ymax_cl = max(0, min(orig_h, ymin)), max(0, min(orig_h, ymax))
+            xmin_cl, xmax_cl = max(0, min(orig_w, xmin)), max(0, min(orig_w, xmax))
+
+            if ymax_cl > ymin_cl and xmax_cl > xmin_cl:
+                crop_img = orig_image.crop((xmin_cl, ymin_cl, xmax_cl, ymax_cl))
+                concept_cutouts = self.extract_concept_parts(crop_img, [label])
+
+                full_cutout = Image.new("RGBA", (orig_w, orig_h))
+                if concept_cutouts:
+                    full_cutout.paste(concept_cutouts[0], (xmin_cl, ymin_cl))
+                else:
+                    full_cutout.paste(crop_img.convert("RGBA"), (xmin_cl, ymin_cl))
+                extracted_cutouts.append(full_cutout)
+            else:
+                extracted_cutouts.append(Image.new("RGBA", (orig_w, orig_h)))
+
+        return extracted_cutouts
+
     @time_it("sam3_concept_segmentation")
     def segment_with_concepts(
         self,
@@ -276,7 +469,6 @@ class Sam3Detector(BaseDetector):
         else:
             logger.info("  • No candidate concept masks detected above score 0.05.")
 
-        # Select indices matching active_thresh or fall back to top candidate masks
         valid_indices = [i for i, s in enumerate(scores_np) if s >= active_thresh]
         if len(valid_indices) == 0 and len(scores_np) > 0:
             logger.info(
