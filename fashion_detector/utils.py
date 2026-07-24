@@ -66,8 +66,59 @@ CATEGORY_MAPPING = {
     "rings": "jewelry",
     "brooches": "jewelry",
 }
+CATEGORY_HIERARCHY = {
+    "Clothing": {
+        "Dresses": ["dresses", "jumpsuits", "skirts"],
+        "Tops": ["tops", "shirts", "t shirts", "sweaters"],
+        "Bottoms": ["shorts", "pants", "jeans"],
+        "Outerwear": ["jackets", "blazers", "jackets blazers", "coats", "suits", "suits sets"],
+    },
+    "Footwear": {
+        "Sneakers": ["sneakers"],
+        "Boots": ["boots"],
+        "Sandals": ["sandals", "heels", "flats", "loafers", "mules slides", "dress shoes"],
+    },
+    "Accessories": {
+        "Hats": ["hats"],
+        "Watches": ["watches"],
+        "Belts": ["belts", "sunglasses", "wallets", "scarves", "scarves shawls", "ties", "jewelry", "earrings", "necklaces", "bracelets", "rings", "brooches"],
+    },
+    "Bags": {
+        "Tote": ["tote bags", "handle bags", "clutches"],
+        "Backpack": ["backpacks"],
+        "Crossbody": ["crossbody bags", "shoulder bags", "messenger bags", "belt bags", "briefcases", "duffel bags"],
+    },
+}
+
 user_categories = list(set(CATEGORY_MAPPING.keys()))
 mapped_user_categories = list(set(CATEGORY_MAPPING.values()))
+
+
+def get_broad_categories() -> List[str]:
+    """Returns top-level broad categories from taxonomy hierarchy."""
+    return list(CATEGORY_HIERARCHY.keys())
+
+
+def get_fine_categories_for_broad(broad_cat: str) -> List[str]:
+    """Returns all fine-grained category keys matching a broad category."""
+    if broad_cat not in CATEGORY_HIERARCHY:
+        return user_categories
+    fine_cats = []
+    for subcat_list in CATEGORY_HIERARCHY[broad_cat].values():
+        fine_cats.extend(subcat_list)
+    return list(set(fine_cats))
+
+
+def get_parent_taxonomy_for_fine(fine_cat: str) -> Tuple[str, str]:
+    """Finds broad category and subcategory for a given fine category key."""
+    fine_clean = fine_cat.strip().lower()
+    for broad, subcats in CATEGORY_HIERARCHY.items():
+        for subcat, fine_list in subcats.items():
+            if fine_clean in [f.strip().lower() for f in fine_list]:
+                return broad, subcat
+    # Default fallback mapping
+    return "Clothing", "Other"
+
 
 
 def clean_categories(raw_detected_categories: List[str]) -> List[str]:
