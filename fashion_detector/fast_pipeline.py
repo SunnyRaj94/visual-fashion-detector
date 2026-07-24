@@ -21,6 +21,9 @@ from fashion_detector.utils import (
 )
 
 
+NEGATIVE_CLASSES = ["human face", "skin", "hair", "background", "nothing"]
+
+
 class DetectedFashionObject(BaseModel):
     """Pydantic v2 schema representing a single detected fashion item with its in-memory RGBA crop."""
 
@@ -93,6 +96,25 @@ class FastFashionPipelineResult(BaseModel):
         elif self.processed_image:
             display(self.processed_image)
 
+    def to_json_dict(self) -> Dict[str, Any]:
+        """Returns a JSON-serializable dictionary excluding binary PIL images."""
+        return {
+            "total_objects": self.total_objects,
+            "processing_time_ms": self.processing_time_ms,
+            "image_size": self.image_size,
+            "objects": [
+                {
+                    "label": obj.label,
+                    "broad_category": obj.broad_category,
+                    "subcategory": obj.subcategory,
+                    "score": obj.score,
+                    "box": obj.box,
+                    "metadata": obj.metadata,
+                }
+                for obj in self.objects
+            ],
+        }
+
 
 class FastFashionPipeline:
     """High-speed zero-shot fashion segmentation & classification pipeline (<1s target latency).
@@ -109,12 +131,16 @@ class FastFashionPipeline:
         config: Optional[Config] = None,
         box_threshold: float = 0.25,
         text_threshold: float = 0.25,
+        min_score_threshold: float = 0.20,
+        max_detection_size: int = 640,
         sam_model_name: str = "facebook/sam2.1-hiera-small",
         use_broad_category_batches: bool = True,
     ):
         self.config = config or Config()
         self.box_threshold = box_threshold
         self.text_threshold = text_threshold
+        self.min_score_threshold = min_score_threshold
+        self.max_detection_size = max_detection_size
         self.use_broad_category_batches = use_broad_category_batches
 
         # Update config model settings for SAM2 if needed
@@ -128,14 +154,29 @@ class FastFashionPipeline:
         self.fashion_clip = FashionClipDetector(self.config)
 
     def load_models(self) -> None:
-        """Preloads all pipeline models to warm up memory and GPU caches."""
+        """Preloads all pipeline models and pre-caches FashionCLIP text embeddings on GPU/MPS."""
         logger.info(
             "Warming up fast pipeline models (Grounding DINO, SAM2, FashionCLIP)..."
         )
         self.dino.load_model()
         self.sam2.load_model()
         self.fashion_clip.load_model()
-        logger.info("Fast pipeline models warm-up complete.")
+
+        # Pre-cache FashionCLIP text features for broad candidate sets + negative classes
+        logger.info("Pre-caching vectorized FashionCLIP text embeddings...")
+        for broad_cat in get_broad_categories():
+            fine_cats = get_fine_categories_for_broad(broad_cat) + NEGATIVE_CLASSES
+            self.fashion_clip.get_text_features(fine_cats)
+
+        # Pre-cache overall candidate categories
+        all_fine = []
+        for broad, subcats in CATEGORY_HIERARCHY.items():
+            for subcat, fine_list in subcats.items():
+                all_fine.extend(fine_list)
+        all_fine = list(set(all_fine)) + NEGATIVE_CLASSES
+        self.fashion_clip.get_text_features(all_fine)
+
+        logger.info("Fast pipeline models warm-up & text embeddings cache complete.")
 
     @staticmethod
     def _compute_iou(box1: List[float], box2: List[float]) -> float:
@@ -189,7 +230,20 @@ class FastFashionPipeline:
                 queries=broad_queries,
                 box_threshold=self.box_threshold,
                 text_threshold=self.text_threshold,
+                max_detection_size=self.max_detection_size,
             )
+            # Map detected broad label to proper taxonomy broad category name
+            for p in proposals:
+                label_lower = p.label.lower()
+                if "footwear" in label_lower or "shoe" in label_lower:
+                    p.metadata["broad_category"] = "Footwear"
+                elif "bag" in label_lower:
+                    p.metadata["broad_category"] = "Bags"
+                elif "accessor" in label_lower or "watch" in label_lower or "hat" in label_lower or "belt" in label_lower:
+                    p.metadata["broad_category"] = "Accessories"
+                else:
+                    p.metadata["broad_category"] = "Clothing"
+
             all_proposals.extend(proposals)
         else:
             # Fine categories split into query batches
@@ -260,6 +314,7 @@ class FastFashionPipeline:
                     "box": prop.box,
                     "segmented_image": cropped_cutout,
                     "mask": mask_np,
+                    "broad_category": prop.metadata.get("broad_category", "Clothing"),
                 }
             )
 
@@ -269,57 +324,70 @@ class FastFashionPipeline:
     def _verify_labels_fashion_clip(
         self, image: Image.Image, segmented_objects: List[Dict[str, Any]]
     ) -> List[DetectedFashionObject]:
-        """Classifies each segmented cutout crop using FashionCLIP to verify fine-grained labels."""
+        """Classifies each segmented cutout crop using FashionCLIP with broad category candidate scoping and negative class suppression."""
         if not segmented_objects:
             return []
 
-        # Build mock proposals for FashionCLIP classify_crops
-        proposals_to_classify = []
+        final_objects: List[DetectedFashionObject] = []
+
+        # Group proposals by broad category for optimal scoped batch classification
+        grouped_proposals: Dict[str, List[Dict[str, Any]]] = {}
         for obj in segmented_objects:
-            proposals_to_classify.append(
+            broad_cat = obj.get("broad_category", "Clothing")
+            grouped_proposals.setdefault(broad_cat, []).append(obj)
+
+        for broad_cat, group_objs in grouped_proposals.items():
+            # Scoped candidate classes for this broad group + negative classes
+            candidate_cats = get_fine_categories_for_broad(broad_cat) + NEGATIVE_CLASSES
+
+            proposals_to_classify = [
                 Detection(
                     box=obj["box"],
                     label=obj["label"],
                     score=obj["score"],
                     mask=obj["mask"],
                 )
+                for obj in group_objs
+            ]
+
+            classified_detections = self.fashion_clip.classify_crops(
+                image=image,
+                proposals=proposals_to_classify,
+                categories=candidate_cats,
             )
 
-        # Gather target fine categories
-        all_fine_categories = []
-        for broad, subcats in CATEGORY_HIERARCHY.items():
-            for subcat, fine_list in subcats.items():
-                all_fine_categories.extend(fine_list)
-        all_fine_categories = list(set(all_fine_categories))
+            for obj, det in zip(group_objs, classified_detections):
+                verified_label = det.label
 
-        # Classify all crops in batch with FashionCLIP
-        classified_detections = self.fashion_clip.classify_crops(
-            image=image,
-            proposals=proposals_to_classify,
-            categories=all_fine_categories,
-        )
+                # Filter out negative class detections (face, hair, skin, background) and low-confidence items
+                if (
+                    verified_label.lower() in NEGATIVE_CLASSES
+                    or det.score < self.min_score_threshold
+                ):
+                    logger.info(
+                        f"Filtering false positive / low score object: '{verified_label}' (score={det.score:.2f})"
+                    )
+                    continue
 
-        final_objects: List[DetectedFashionObject] = []
-        for idx, (obj, det) in enumerate(zip(segmented_objects, classified_detections)):
-            verified_label = det.label
-            broad_cat, subcat = get_parent_taxonomy_for_fine(verified_label)
+                derived_broad, subcat = get_parent_taxonomy_for_fine(verified_label)
+                final_broad = derived_broad if derived_broad != "Clothing" or broad_cat == "Clothing" else broad_cat
 
-            final_objects.append(
-                DetectedFashionObject(
-                    label=verified_label,
-                    broad_category=broad_cat,
-                    subcategory=subcat,
-                    score=float(det.score),
-                    box=obj["box"],
-                    mask=obj["mask"],
-                    image=obj["segmented_image"],  # Transparent PIL RGBA Image object
-                    metadata={
-                        "proposal_label": obj["label"],
-                        "proposal_score": float(obj["score"]),
-                        "fashion_clip_score": float(det.score),
-                    },
+                final_objects.append(
+                    DetectedFashionObject(
+                        label=verified_label,
+                        broad_category=final_broad,
+                        subcategory=subcat,
+                        score=float(det.score),
+                        box=obj["box"],
+                        mask=obj["mask"],
+                        image=obj["segmented_image"],  # Transparent PIL RGBA Image object
+                        metadata={
+                            "proposal_label": obj["label"],
+                            "proposal_score": float(obj["score"]),
+                            "fashion_clip_score": float(det.score),
+                        },
+                    )
                 )
-            )
 
         return final_objects
 
@@ -364,7 +432,7 @@ class FastFashionPipeline:
         # 3. Stage 2: SAM 2 Single Batch Box Segmentation
         segmented_objects = self._segment_boxes_batch(image, proposals)
 
-        # 4. Stage 3: FashionCLIP Fine-grained Crop Verification
+        # 4. Stage 3: FashionCLIP Fine-grained Crop Verification with Scoped Filtering
         verified_objects = self._verify_labels_fashion_clip(image, segmented_objects)
 
         # 5. Generate Annotated Image & Interactive HTML
@@ -395,3 +463,4 @@ class FastFashionPipeline:
             annotated_image=annotated_img,
             interactive_html=html_str,
         )
+

@@ -69,20 +69,36 @@ class GroundingDinoDetector(BaseDetector):
         # Format the queries for Grounding DINO. It requires a string like "shirt . pants . shoes ."
         query_str = " . ".join(queries) + " ."
 
+        # Optional image resolution scaling for high-speed inference
+        max_size = kwargs.get("max_detection_size", 640)
+        if max_size and max(image.size) > max_size:
+            scale = max_size / float(max(image.size))
+            new_w = max(1, int(image.width * scale))
+            new_h = max(1, int(image.height * scale))
+            proc_image = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
+        else:
+            proc_image = image
+
         # Prepare inputs
-        inputs = self.processor(images=image, text=query_str, return_tensors="pt").to(
+        inputs = self.processor(images=proc_image, text=query_str, return_tensors="pt").to(
             self.device
         )
 
-        # Run inference
-        with torch.no_grad():
-            outputs = self.model(**inputs)
+        # Run inference in 16-bit autocast mode
+        device_str = str(self.device).lower()
+        with torch.inference_mode():
+            if any(d in device_str for d in ["cuda", "mps"]):
+                device_type = "cuda" if "cuda" in device_str else "mps"
+                dtype = torch.bfloat16 if device_type == "mps" else torch.float16
+                with torch.autocast(device_type=device_type, dtype=dtype):
+                    outputs = self.model(**inputs)
+            else:
+                outputs = self.model(**inputs)
 
-        # Post-process
+        # Post-process target_sizes directly to original image size
         target_sizes = torch.tensor([image.size[::-1]]).to(self.device)
 
         # Perform post-processing
-        # Note: target_sizes must be on CPU for post_process if it runs there, but matching device is safer
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,

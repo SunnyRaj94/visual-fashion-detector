@@ -83,25 +83,22 @@ CATEGORY_HIERARCHY = {
     "Footwear": {
         "Sneakers": ["sneakers"],
         "Boots": ["boots"],
-        "Sandals": [
-            "sandals",
+        "Sandals": ["sandals", "mules slides"],
+        "Heels & Flats": [
             "heels",
             "flats",
             "loafers",
-            "mules slides",
             "dress shoes",
         ],
     },
     "Accessories": {
         "Hats": ["hats"],
         "Watches": ["watches"],
-        "Belts": [
-            "belts",
-            "sunglasses",
-            "wallets",
-            "scarves",
-            "scarves shawls",
-            "ties",
+        "Belts": ["belts"],
+        "Eyewear": ["sunglasses"],
+        "Wallets": ["wallets"],
+        "Scarves & Ties": ["scarves", "scarves shawls", "ties"],
+        "Jewelry": [
             "jewelry",
             "earrings",
             "necklaces",

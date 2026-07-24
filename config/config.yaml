@@ -77,12 +77,13 @@ models:
   fashion_clip:
     name: "patrickjohncyh/fashion-clip"
   
-  # vision_llm:
-  #   name: "openai/google/gemma-4-e2b" # Used through LiteLLM
-  #   temperature: 0.0
-  #   max_tokens: 4000
-  #   api_key: lm-studio  # Optional custom API key string
-  #   api_base: 'http://127.0.0.1:1234/v1' # Optional custom API base endpoint URL (e.g. for Ollama or vLLM proxy)
+  vision_llm:
+    provider: openai
+    name: "google/gemma-4-e4b" # Used through LiteLLM
+    temperature: 0.0
+    max_tokens: 8000
+    api_key: lm-studio  # Optional custom API key string
+    api_base: 'http://127.0.0.1:1234/v1' # Optional custom API base endpoint URL (e.g. for Ollama or vLLM proxy)
 
   # vision_llm:
   #   provider: openrouter
@@ -99,9 +100,10 @@ models:
   #   api_key_env: "GROQ_API_KEY"
   #   temperature: 0.0
   #   max_tokens: 4000
-  vision_llm:
-    provider: "gemini"
-    model: "gemini-3.5-flash"
-    temperature: 0.0
-    max_tokens: 4000
-    api_key_env: "GEMINI_API_KEY"
+
+  # vision_llm:
+  #   provider: "gemini"
+  #   model: "gemini-3.5-flash"
+  #   temperature: 0.0
+  #   max_tokens: 4000
+  #   api_key_env: "GEMINI_API_KEY"

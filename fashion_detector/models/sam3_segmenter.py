@@ -129,8 +129,15 @@ class Sam2Detector(BaseDetector):
             images=orig_image, input_boxes=[converted_boxes], return_tensors="pt"
         ).to(self.device)
 
-        with torch.no_grad():
-            outputs = self.model(**inputs)
+        device_str = str(self.device).lower()
+        with torch.inference_mode():
+            if any(d in device_str for d in ["cuda", "mps"]):
+                device_type = "cuda" if "cuda" in device_str else "mps"
+                dtype = torch.bfloat16 if device_type == "mps" else torch.float16
+                with torch.autocast(device_type=device_type, dtype=dtype):
+                    outputs = self.model(**inputs)
+            else:
+                outputs = self.model(**inputs)
 
         raw_masks = self.processor.image_processor.post_process_masks(
             masks=outputs.pred_masks,
