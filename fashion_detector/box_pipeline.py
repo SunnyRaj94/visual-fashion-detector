@@ -9,7 +9,7 @@ from fashion_detector.config import Config
 from fashion_detector.logging import logger, time_it
 from fashion_detector.models.base import Detection
 from fashion_detector.models.grounding_dino import GroundingDinoDetector
-from fashion_detector.models.sam3_segmenter import Sam2Detector, SamSegmenter
+from fashion_detector.models.sam3_segmenter import Sam2Detector
 from fashion_detector.models.fashion_clip import FashionClipDetector
 from fashion_detector.utils import (
     CATEGORY_HIERARCHY,
@@ -20,12 +20,11 @@ from fashion_detector.utils import (
     generate_interactive_html,
 )
 
-
 NEGATIVE_CLASSES = ["human face", "skin", "hair", "background", "nothing"]
 
 
-class DetectedFashionObject(BaseModel):
-    """Pydantic v2 schema representing a single detected fashion item with its in-memory RGBA crop."""
+class DetectedBoxObject(BaseModel):
+    """Pydantic v2 schema representing a single detected fashion item (bounding box focus)."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -43,23 +42,23 @@ class DetectedFashionObject(BaseModel):
         description="Bounding box [xmin, ymin, xmax, ymax] in pixels"
     )
     mask: Optional[np.ndarray] = Field(
-        default=None, description="Binary segmentation mask numpy array"
+        default=None, description="Optional binary segmentation mask numpy array"
     )
-    image: Image.Image = Field(
-        description="Isolated object transparent PIL Image cutout (RGBA format)"
+    crop_image: Image.Image = Field(
+        description="Bounding box cropped PIL Image cutout (RGB or RGBA format)"
     )
     metadata: Dict[str, Any] = Field(
         default_factory=dict, description="Model metadata and intermediate scores"
     )
 
 
-class FastFashionPipelineResult(BaseModel):
-    """Pydantic v2 schema containing pipeline detection results and latency metrics."""
+class BoxFashionPipelineResult(BaseModel):
+    """Pydantic v2 schema containing box detection results and ultra-low latency metrics."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    objects: List[DetectedFashionObject] = Field(
-        description="List of detected fashion objects with masks and transparent RGBA images"
+    objects: List[DetectedBoxObject] = Field(
+        description="List of detected fashion objects with bounding boxes and crop images"
     )
     total_objects: int = Field(description="Total count of detected objects")
     processing_time_ms: float = Field(
@@ -97,7 +96,7 @@ class FastFashionPipelineResult(BaseModel):
             display(self.processed_image)
 
     def to_json_dict(self) -> Dict[str, Any]:
-        """Returns a JSON-serializable dictionary excluding binary PIL images."""
+        """Returns a JSON-serializable dictionary excluding raw PIL images."""
         return {
             "total_objects": self.total_objects,
             "processing_time_ms": self.processing_time_ms,
@@ -116,14 +115,15 @@ class FastFashionPipelineResult(BaseModel):
         }
 
 
-class FastFashionPipeline:
-    """High-speed zero-shot fashion segmentation & classification pipeline (<1s target latency).
+class FastBoxFashionPipeline:
+    """High-speed bounding-box-first fashion detection & classification pipeline (~200ms latency).
 
     Pipeline Architecture:
-    1. Grounding DINO: Detects candidate bounding boxes using batched broad category prompts.
+    1. Grounding DINO: High-precision zero-shot bounding box detection using broad category prompts.
     2. NMS & Filtering: Merges overlapping region proposals.
-    3. SAM 2 (Sam2Detector / sam3_segmenter.py): Batch box-prompted instance segmentation in a single forward pass.
-    4. FashionCLIP: Fast batch crop verification and fine-grained classification.
+    3. Direct Box Cropping: Instant region extraction directly from bounding box coordinates (No SAM 2).
+    4. FashionCLIP: Fast batch crop verification, scoped category classification, and negative class suppression.
+    5. Optional SAM 2: Lazily invoked only when include_masks=True.
     """
 
     def __init__(
@@ -133,7 +133,6 @@ class FastFashionPipeline:
         text_threshold: float = 0.25,
         min_score_threshold: float = 0.20,
         max_detection_size: int = 640,
-        sam_model_name: str = "facebook/sam2.1-hiera-small",
         use_broad_category_batches: bool = True,
     ):
         self.config = config or Config()
@@ -143,24 +142,23 @@ class FastFashionPipeline:
         self.max_detection_size = max_detection_size
         self.use_broad_category_batches = use_broad_category_batches
 
-        # Update config model settings for SAM2 if needed
-        if "sam" not in self.config.models:
-            self.config.models["sam"] = {}
-        self.config.models["sam"]["name"] = sam_model_name
-
-        # Initialize detector components using sam3_segmenter.py classes
+        # Initialize core detectors (SAM 2 is initialized lazily if requested)
         self.dino = GroundingDinoDetector(self.config)
-        self.sam2 = Sam2Detector(self.config)
         self.fashion_clip = FashionClipDetector(self.config)
+        self.sam2 = None
 
-    def load_models(self) -> None:
-        """Preloads all pipeline models and pre-caches FashionCLIP text embeddings on GPU/MPS."""
+    def load_models(self, include_sam2: bool = False) -> None:
+        """Preloads pipeline models and pre-caches FashionCLIP text embeddings on GPU/MPS."""
         logger.info(
-            "Warming up fast pipeline models (Grounding DINO, SAM2, FashionCLIP)..."
+            "Warming up FastBoxFashionPipeline models (Grounding DINO, FashionCLIP)..."
         )
         self.dino.load_model()
-        self.sam2.load_model()
         self.fashion_clip.load_model()
+
+        if include_sam2:
+            if self.sam2 is None:
+                self.sam2 = Sam2Detector(self.config)
+            self.sam2.load_model()
 
         # Pre-cache FashionCLIP text features for broad candidate sets + negative classes
         logger.info("Pre-caching vectorized FashionCLIP text embeddings...")
@@ -168,15 +166,7 @@ class FastFashionPipeline:
             fine_cats = get_fine_categories_for_broad(broad_cat) + NEGATIVE_CLASSES
             self.fashion_clip.get_text_features(fine_cats)
 
-        # Pre-cache overall candidate categories
-        all_fine = []
-        for broad, subcats in CATEGORY_HIERARCHY.items():
-            for subcat, fine_list in subcats.items():
-                all_fine.extend(fine_list)
-        all_fine = list(set(all_fine)) + NEGATIVE_CLASSES
-        self.fashion_clip.get_text_features(all_fine)
-
-        logger.info("Fast pipeline models warm-up & text embeddings cache complete.")
+        logger.info("FastBoxFashionPipeline warm-up & text embeddings cache complete.")
 
     @staticmethod
     def _compute_iou(box1: List[float], box2: List[float]) -> float:
@@ -200,7 +190,6 @@ class FastFashionPipeline:
         if not proposals:
             return []
 
-        # Sort by confidence score descending
         sorted_props = sorted(proposals, key=lambda d: d.score, reverse=True)
         keep: List[Detection] = []
 
@@ -219,11 +208,10 @@ class FastFashionPipeline:
     def _detect_boxes_batched(
         self, image: Image.Image, batch_size: int = 4
     ) -> List[Detection]:
-        """Runs Grounding DINO detection using category batches to improve latency and accuracy."""
+        """Runs Grounding DINO detection using broad category prompts."""
         all_proposals: List[Detection] = []
 
         if self.use_broad_category_batches:
-            # Broad stage queries: Clothing, Footwear, Accessories, Bags
             broad_queries = ["clothing", "footwear", "accessories", "bags"]
             proposals = self.dino.detect(
                 image,
@@ -232,7 +220,6 @@ class FastFashionPipeline:
                 text_threshold=self.text_threshold,
                 max_detection_size=self.max_detection_size,
             )
-            # Map detected broad label to proper taxonomy broad category name
             for p in proposals:
                 label_lower = p.label.lower()
                 if "footwear" in label_lower or "shoe" in label_lower:
@@ -246,14 +233,12 @@ class FastFashionPipeline:
 
             all_proposals.extend(proposals)
         else:
-            # Fine categories split into query batches
             all_fine = []
             for broad, subcats in CATEGORY_HIERARCHY.items():
                 for subcat, fine_list in subcats.items():
                     all_fine.extend(fine_list)
             all_fine = list(set(all_fine))
 
-            # Query in batches
             for i in range(0, len(all_fine), batch_size):
                 query_batch = all_fine[i : i + batch_size]
                 proposals = self.dino.detect(
@@ -261,83 +246,69 @@ class FastFashionPipeline:
                     queries=query_batch,
                     box_threshold=self.box_threshold,
                     text_threshold=self.text_threshold,
+                    max_detection_size=self.max_detection_size,
                 )
                 all_proposals.extend(proposals)
 
-        # Merge and NMS deduplicate candidate boxes
         filtered_proposals = self._apply_nms(all_proposals, iou_threshold=0.5)
         logger.info(
             f"Batched Grounding DINO detected {len(all_proposals)} raw proposals, reduced to {len(filtered_proposals)} after NMS."
         )
         return filtered_proposals
 
-    @time_it("SAM 2 Batch Box Segmentation")
-    def _segment_boxes_batch(
+    @time_it("Direct Box Crop Extraction")
+    def _extract_box_crops_direct(
         self, image: Image.Image, proposals: List[Detection]
     ) -> List[Dict[str, Any]]:
-        """Passes all candidate boxes to Sam2Detector (from sam3_segmenter.py) for instant batch segmentation."""
+        """Instantly crops region proposals directly from bounding box coordinates (0ms latency, No SAM 2)."""
         if not proposals:
             return []
 
-        # Call extract_segmented_parts directly from Sam2Detector in sam3_segmenter.py
-        cutouts = self.sam2.extract_segmented_parts(image, box_inputs=proposals)
+        width, height = image.size
+        cropped_objects = []
 
-        segmented_objects = []
-        for prop, cutout in zip(proposals, cutouts):
-            # Extract binary mask array from alpha channel of transparent RGBA cutout
-            cutout_np = np.array(cutout)
-            alpha_channel = (
-                cutout_np[:, :, 3]
-                if cutout_np.ndim == 3 and cutout_np.shape[2] == 4
-                else cutout_np > 0
-            )
-            mask_np = alpha_channel > 0
-
-            # Crop transparent cutout image to candidate bounding box with padding
+        for prop in proposals:
             xmin, ymin, xmax, ymax = map(int, prop.box)
-            w, h = cutout.size
-            crop_xmin = max(0, xmin - 5)
-            crop_ymin = max(0, ymin - 5)
-            crop_xmax = min(w, xmax + 5)
-            crop_ymax = min(h, ymax + 5)
+            crop_xmin = max(0, xmin)
+            crop_ymin = max(0, ymin)
+            crop_xmax = min(width, xmax)
+            crop_ymax = min(height, ymax)
 
-            cropped_cutout = cutout
             if crop_xmax > crop_xmin and crop_ymax > crop_ymin:
-                cropped_cutout = cutout.crop(
-                    (crop_xmin, crop_ymin, crop_xmax, crop_ymax)
-                )
+                crop = image.crop((crop_xmin, crop_ymin, crop_xmax, crop_ymax))
+            else:
+                crop = image.copy()
 
-            segmented_objects.append(
+            cropped_objects.append(
                 {
                     "label": prop.label,
                     "score": prop.score,
                     "box": prop.box,
-                    "segmented_image": cropped_cutout,
-                    "mask": mask_np,
+                    "crop_image": crop,
+                    "mask": None,
                     "broad_category": prop.metadata.get("broad_category", "Clothing"),
                 }
             )
 
-        return segmented_objects
+        return cropped_objects
 
-    @time_it("FashionCLIP Batch Crop Verification")
+    @time_it("FashionCLIP Scoped Verification")
     def _verify_labels_fashion_clip(
-        self, image: Image.Image, segmented_objects: List[Dict[str, Any]]
-    ) -> List[DetectedFashionObject]:
-        """Classifies each segmented cutout crop using FashionCLIP with broad category candidate scoping and negative class suppression."""
-        if not segmented_objects:
+        self, image: Image.Image, candidate_objects: List[Dict[str, Any]]
+    ) -> List[DetectedBoxObject]:
+        """Classifies each candidate box crop using FashionCLIP with broad category candidate scoping and negative class suppression."""
+        if not candidate_objects:
             return []
 
-        final_objects: List[DetectedFashionObject] = []
+        final_objects: List[DetectedBoxObject] = []
 
         # Group proposals by broad category for optimal scoped batch classification
         grouped_proposals: Dict[str, List[Dict[str, Any]]] = {}
-        for obj in segmented_objects:
+        for obj in candidate_objects:
             broad_cat = obj.get("broad_category", "Clothing")
             grouped_proposals.setdefault(broad_cat, []).append(obj)
 
         for broad_cat, group_objs in grouped_proposals.items():
-            # Scoped candidate classes for this broad group + negative classes
             candidate_cats = get_fine_categories_for_broad(broad_cat) + NEGATIVE_CLASSES
 
             proposals_to_classify = [
@@ -373,14 +344,14 @@ class FastFashionPipeline:
                 final_broad = derived_broad if derived_broad != "Clothing" or broad_cat == "Clothing" else broad_cat
 
                 final_objects.append(
-                    DetectedFashionObject(
+                    DetectedBoxObject(
                         label=verified_label,
                         broad_category=final_broad,
                         subcategory=subcat,
                         score=float(det.score),
                         box=obj["box"],
                         mask=obj["mask"],
-                        image=obj["segmented_image"],  # Transparent PIL RGBA Image object
+                        crop_image=obj["crop_image"],
                         metadata={
                             "proposal_label": obj["label"],
                             "proposal_score": float(obj["score"]),
@@ -394,17 +365,17 @@ class FastFashionPipeline:
 
     @staticmethod
     def _apply_containment_nms(
-        objects: List[DetectedFashionObject],
+        objects: List[DetectedBoxObject],
         iou_threshold: float = 0.45,
         ioa_threshold: float = 0.80,
-    ) -> List[DetectedFashionObject]:
+    ) -> List[DetectedBoxObject]:
         """Applies IoU and Intersection-over-Area (IoA) containment filtering to eliminate giant outer group boxes."""
         if not objects:
             return []
 
         # Sort objects by score descending
         sorted_objs = sorted(objects, key=lambda o: o.score, reverse=True)
-        kept_objs: List[DetectedFashionObject] = []
+        kept_objs: List[DetectedBoxObject] = []
 
         for obj in sorted_objs:
             box_a = obj.box
@@ -438,15 +409,18 @@ class FastFashionPipeline:
         return kept_objs
 
     def process(
-        self, image_input: Union[str, Image.Image]
-    ) -> FastFashionPipelineResult:
-        """Executes the complete high-speed fashion detection and segmentation pipeline.
+        self,
+        image_input: Union[str, Image.Image],
+        include_masks: bool = False,
+    ) -> BoxFashionPipelineResult:
+        """Executes the high-speed bounding-box fashion detection & classification pipeline (~200ms latency).
 
         Args:
             image_input: PIL Image or filepath/URL string.
+            include_masks: Set to True to lazily run SAM 2 segmentation masks (~139ms extra time). Default False.
 
         Returns:
-            FastFashionPipelineResult: Pydantic v2 result model containing DetectedFashionObjects with RGBA images.
+            BoxFashionPipelineResult: Pydantic v2 result model containing DetectedBoxObjects.
         """
         start_time = time.perf_counter()
 
@@ -465,7 +439,7 @@ class FastFashionPipeline:
 
         if not proposals:
             elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-            return FastFashionPipelineResult(
+            return BoxFashionPipelineResult(
                 objects=[],
                 total_objects=0,
                 processing_time_ms=round(elapsed_ms, 2),
@@ -475,11 +449,32 @@ class FastFashionPipeline:
                 interactive_html=generate_interactive_html(image, []),
             )
 
-        # 3. Stage 2: SAM 2 Single Batch Box Segmentation
-        segmented_objects = self._segment_boxes_batch(image, proposals)
+        # 3. Stage 2: Crop Extraction (Fast Direct Box Crop vs Optional SAM 2 Segmentation)
+        if include_masks:
+            if self.sam2 is None:
+                self.sam2 = Sam2Detector(self.config)
+                self.sam2.load_model()
+            cutouts = self.sam2.extract_segmented_parts(image, box_inputs=proposals)
+            candidate_objects = []
+            for prop, cutout in zip(proposals, cutouts):
+                cutout_np = np.array(cutout)
+                alpha_channel = cutout_np[:, :, 3] if cutout_np.ndim == 3 and cutout_np.shape[2] == 4 else cutout_np > 0
+                mask_np = alpha_channel > 0
+                candidate_objects.append(
+                    {
+                        "label": prop.label,
+                        "score": prop.score,
+                        "box": prop.box,
+                        "crop_image": cutout,
+                        "mask": mask_np,
+                        "broad_category": prop.metadata.get("broad_category", "Clothing"),
+                    }
+                )
+        else:
+            candidate_objects = self._extract_box_crops_direct(image, proposals)
 
         # 4. Stage 3: FashionCLIP Fine-grained Crop Verification with Scoped Filtering
-        verified_objects = self._verify_labels_fashion_clip(image, segmented_objects)
+        verified_objects = self._verify_labels_fashion_clip(image, candidate_objects)
 
         # 5. Generate Annotated Image & Interactive HTML
         detections_list = [
@@ -497,10 +492,10 @@ class FastFashionPipeline:
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         logger.info(
-            f"FastFashionPipeline completed: {len(verified_objects)} objects detected in {elapsed_ms:.1f} ms."
+            f"FastBoxFashionPipeline completed: {len(verified_objects)} objects detected in {elapsed_ms:.1f} ms."
         )
 
-        return FastFashionPipelineResult(
+        return BoxFashionPipelineResult(
             objects=verified_objects,
             total_objects=len(verified_objects),
             processing_time_ms=round(elapsed_ms, 2),
@@ -509,4 +504,3 @@ class FastFashionPipeline:
             annotated_image=annotated_img,
             interactive_html=html_str,
         )
-

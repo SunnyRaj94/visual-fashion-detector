@@ -4,6 +4,11 @@ from fashion_detector.fast_pipeline import (
     DetectedFashionObject,
     FastFashionPipelineResult,
 )
+from fashion_detector.box_pipeline import (
+    FastBoxFashionPipeline,
+    DetectedBoxObject,
+    BoxFashionPipelineResult,
+)
 from fashion_detector.utils import (
     CATEGORY_MAPPING,
     CATEGORY_HIERARCHY,
@@ -17,6 +22,9 @@ __all__ = [
     "FastFashionPipeline",
     "DetectedFashionObject",
     "FastFashionPipelineResult",
+    "FastBoxFashionPipeline",
+    "DetectedBoxObject",
+    "BoxFashionPipelineResult",
     "CATEGORY_MAPPING",
     "CATEGORY_HIERARCHY",
     "get_broad_categories",
