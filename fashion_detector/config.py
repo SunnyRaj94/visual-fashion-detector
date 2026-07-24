@@ -71,6 +71,16 @@ class Config:
         self.categories: Dict[str, List[str]] = DEFAULT_CATEGORIES
         self.models: Dict[str, Dict[str, Any]] = {}
 
+        # Resolve default config path if not provided
+        if not config_path:
+            env_config = os.getenv("FASHION_DETECTOR_CONFIG")
+            if env_config and os.path.exists(env_config):
+                config_path = env_config
+            elif os.path.exists("config/config.yaml"):
+                config_path = "config/config.yaml"
+            elif os.path.exists("config.yaml"):
+                config_path = "config.yaml"
+
         if config_path:
             self.load_from_file(config_path)
         else:
