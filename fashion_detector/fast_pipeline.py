@@ -17,6 +17,8 @@ from fashion_detector.utils import (
     get_broad_categories,
     get_fine_categories_for_broad,
     get_parent_taxonomy_for_fine,
+    draw_bounding_boxes,
+    generate_interactive_html,
 )
 
 
@@ -56,6 +58,30 @@ class FastFashionPipelineResult(BaseModel):
     total_objects: int = Field(description="Total count of detected objects")
     processing_time_ms: float = Field(description="Total pipeline execution latency in ms")
     image_size: Tuple[int, int] = Field(description="Original image dimensions (width, height)")
+    processed_image: Optional[Image.Image] = Field(
+        default=None, description="The loaded RGB PIL Image object processed by the pipeline"
+    )
+    annotated_image: Optional[Image.Image] = Field(
+        default=None, description="PIL Image object with bounding boxes and labels drawn on top"
+    )
+    interactive_html: Optional[str] = Field(
+        default=None, description="Interactive HTML visualization snippet ready for Jupyter/web"
+    )
+
+    def visualize(self, mode: str = "interactive"):
+        """Displays visualization directly inside Jupyter notebooks.
+
+        Args:
+            mode: 'interactive' (HTML) or 'annotated' (PIL Image).
+        """
+        from IPython.display import HTML, display
+
+        if mode == "interactive" and self.interactive_html:
+            display(HTML(self.interactive_html))
+        elif self.annotated_image:
+            display(self.annotated_image)
+        elif self.processed_image:
+            display(self.processed_image)
 
 
 class FastFashionPipeline:
@@ -291,6 +317,9 @@ class FastFashionPipeline:
                 total_objects=0,
                 processing_time_ms=round(elapsed_ms, 2),
                 image_size=(img_w, img_h),
+                processed_image=image,
+                annotated_image=image.copy(),
+                interactive_html=generate_interactive_html(image, []),
             )
 
         # 3. Stage 2: SAM 2 Single Batch Box Segmentation
@@ -298,6 +327,20 @@ class FastFashionPipeline:
 
         # 4. Stage 3: FashionCLIP Fine-grained Crop Verification
         verified_objects = self._verify_labels_fashion_clip(image, segmented_objects)
+
+        # 5. Generate Annotated Image & Interactive HTML
+        detections_list = [
+            Detection(
+                box=obj.box,
+                label=obj.label,
+                score=obj.score,
+                mask=obj.mask,
+            )
+            for obj in verified_objects
+        ]
+
+        annotated_img = draw_bounding_boxes(image, detections_list)
+        html_str = generate_interactive_html(image, detections_list)
 
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
         logger.info(
@@ -309,4 +352,7 @@ class FastFashionPipeline:
             total_objects=len(verified_objects),
             processing_time_ms=round(elapsed_ms, 2),
             image_size=(img_w, img_h),
+            processed_image=image,
+            annotated_image=annotated_img,
+            interactive_html=html_str,
         )

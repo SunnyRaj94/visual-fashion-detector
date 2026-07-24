@@ -71,22 +71,56 @@ CATEGORY_HIERARCHY = {
         "Dresses": ["dresses", "jumpsuits", "skirts"],
         "Tops": ["tops", "shirts", "t shirts", "sweaters"],
         "Bottoms": ["shorts", "pants", "jeans"],
-        "Outerwear": ["jackets", "blazers", "jackets blazers", "coats", "suits", "suits sets"],
+        "Outerwear": [
+            "jackets",
+            "blazers",
+            "jackets blazers",
+            "coats",
+            "suits",
+            "suits sets",
+        ],
     },
     "Footwear": {
         "Sneakers": ["sneakers"],
         "Boots": ["boots"],
-        "Sandals": ["sandals", "heels", "flats", "loafers", "mules slides", "dress shoes"],
+        "Sandals": [
+            "sandals",
+            "heels",
+            "flats",
+            "loafers",
+            "mules slides",
+            "dress shoes",
+        ],
     },
     "Accessories": {
         "Hats": ["hats"],
         "Watches": ["watches"],
-        "Belts": ["belts", "sunglasses", "wallets", "scarves", "scarves shawls", "ties", "jewelry", "earrings", "necklaces", "bracelets", "rings", "brooches"],
+        "Belts": [
+            "belts",
+            "sunglasses",
+            "wallets",
+            "scarves",
+            "scarves shawls",
+            "ties",
+            "jewelry",
+            "earrings",
+            "necklaces",
+            "bracelets",
+            "rings",
+            "brooches",
+        ],
     },
     "Bags": {
         "Tote": ["tote bags", "handle bags", "clutches"],
         "Backpack": ["backpacks"],
-        "Crossbody": ["crossbody bags", "shoulder bags", "messenger bags", "belt bags", "briefcases", "duffel bags"],
+        "Crossbody": [
+            "crossbody bags",
+            "shoulder bags",
+            "messenger bags",
+            "belt bags",
+            "briefcases",
+            "duffel bags",
+        ],
     },
 }
 
@@ -118,7 +152,6 @@ def get_parent_taxonomy_for_fine(fine_cat: str) -> Tuple[str, str]:
                 return broad, subcat
     # Default fallback mapping
     return "Clothing", "Other"
-
 
 
 def clean_categories(raw_detected_categories: List[str]) -> List[str]:
@@ -264,6 +297,71 @@ def draw_bounding_boxes(
     return annotated
 
 
+def normalize_box_to_pixels(
+    box: List[float], img_width: int, img_height: int, is_1000_scale: bool = False
+) -> Tuple[float, float, float, float]:
+    """Robustly normalizes bounding box coordinates to absolute pixel [xmin, ymin, xmax, ymax].
+
+    Handles:
+    - Absolute pixel coordinates: [xmin, ymin, xmax, ymax]
+    - Normalized 0..1 coordinates: [xmin, ymin, xmax, ymax]
+    - Normalized 0..1000 coordinates (LLM/Gemini style): [ymin, xmin, ymax, xmax] or [xmin, ymin, xmax, ymax]
+    """
+    b = [float(x) for x in box]
+
+    # Detect if box is 0-1000 scale (e.g. Gemini Vision LLM output)
+    # Check 1: Explicit flag
+    # Check 2: Index 0 > Index 3 (e.g., 232 > 214 -> ymin > xmax, impossible for xmin, ymin, xmax, ymax)
+    # Check 3: Max value <= 1000 and max value > 1.0 while image dimensions are smaller or different
+    is_1000 = (
+        is_1000_scale
+        or (b[0] > b[3] and max(b) <= 1000.0)
+        or (b[1] > b[2] and max(b) <= 1000.0)
+        or (
+            max(b) > 1.0
+            and max(b) <= 1000.0
+            and (
+                b[0] > img_width
+                or b[2] > img_width
+                or b[1] > img_height
+                or b[3] > img_height
+            )
+        )
+    )
+
+    if is_1000:
+        ymin_1000, xmin_1000, ymax_1000, xmax_1000 = b
+        # Swap if needed assuming [ymin, xmin, ymax, xmax]
+        if xmin_1000 > xmax_1000 or ymin_1000 > ymax_1000:
+            xmin_1000, ymin_1000, xmax_1000, ymax_1000 = b
+        xmin = (xmin_1000 / 1000.0) * img_width
+        ymin = (ymin_1000 / 1000.0) * img_height
+        xmax = (xmax_1000 / 1000.0) * img_width
+        ymax = (ymax_1000 / 1000.0) * img_height
+    elif max(b) <= 1.0:
+        # Case 2: Normalized 0..1 coordinates
+        xmin = b[0] * img_width
+        ymin = b[1] * img_height
+        xmax = b[2] * img_width
+        ymax = b[3] * img_height
+    else:
+        # Case 3: Already absolute pixel coordinates [xmin, ymin, xmax, ymax]
+        xmin, ymin, xmax, ymax = b[0], b[1], b[2], b[3]
+
+    # Clip within image bounds
+    xmin = max(0.0, min(xmin, float(img_width)))
+    ymin = max(0.0, min(ymin, float(img_height)))
+    xmax = max(0.0, min(xmax, float(img_width)))
+    ymax = max(0.0, min(ymax, float(img_height)))
+
+    if xmin > xmax:
+        xmin, xmax = xmax, xmin
+    if ymin > ymax:
+        ymin, ymax = ymax, ymin
+
+    return xmin, ymin, xmax, ymax
+
+
 def generate_interactive_html(
     image: Image.Image,
     detections: List[Detection],
@@ -377,7 +475,9 @@ def generate_interactive_html(
         reverse=True,
     )
     for idx, det in enumerate(sorted_dets):
-        xmin, ymin, xmax, ymax = det.box
+        xmin, ymin, xmax, ymax = normalize_box_to_pixels(det.box, width, height)
+        # xmin, ymin, xmax, ymax = det.box
+
         # Calculate percentage coordinates for responsiveness
         left = (xmin / width) * 100
         top = (ymin / height) * 100
@@ -501,33 +601,39 @@ def visualize_detections(
         "#7CB342",
     ]
 
-    # Sort detections by area descending so smaller boxes stack on top of larger ones
+    def get_value(obj, key, default=None):
+        """Get a value from a dict or object."""
+
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+
+        if hasattr(obj, key):
+            return getattr(obj, key)
+
+        return default
+
+    def get_box(det):
+        return get_value(det, "box") or get_value(det, "bbox") or [0, 0, 0, 0]
+
     sorted_dets = sorted(
         detections,
         key=lambda d: (
-            (
-                (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[2]
-                - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[0]
-            )
-            * (
-                (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[3]
-                - (d.get("box") or d.get("bbox") or [0, 0, 0, 0])[1]
-            )
+            (get_box(d)[2] - get_box(d)[0]) * (get_box(d)[3] - get_box(d)[1])
         ),
         reverse=True,
     )
-
     for idx, det in enumerate(sorted_dets):
 
-        box = det.get("box") or det.get("bbox")
+        # box = det.get("box") or det.get("bbox")
+        box = get_box(det)
 
         if box is None:
             continue
 
         xmin, ymin, xmax, ymax = box
 
-        label = det.get("label", "object")
-        score = det.get("score")
+        label = get_value(det, "label")
+        score = get_value(det, "score")
 
         area = (xmax - xmin) * (ymax - ymin)
 
