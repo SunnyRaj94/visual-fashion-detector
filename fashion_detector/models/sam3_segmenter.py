@@ -13,6 +13,8 @@ from fashion_detector.logging import logger, time_it
 class Sam2Detector(BaseDetector):
     """SAM 2 / SAM 2.1 specific segmenter utilizing geometric bounding box prompts."""
 
+    MAX_INFERENCE_SIDE: int = 1024
+
     def __init__(self, config: Any):
         super().__init__(config)
         sam_cfg = config.models.get("sam", {})
@@ -20,6 +22,24 @@ class Sam2Detector(BaseDetector):
         self.box_threshold = sam_cfg.get("box_threshold", 0.5)
         self.processor = None
         self.model = None
+        # Cache device metadata once — avoids repeated string parsing per call
+        _device_str = str(self.device).lower()
+        self._use_autocast = any(d in _device_str for d in ["cuda", "mps"])
+        self._device_type = (
+            "cuda"
+            if "cuda" in _device_str
+            else ("mps" if "mps" in _device_str else "cpu")
+        )
+        self._autocast_dtype = (
+            torch.bfloat16 if self._device_type == "mps" else torch.float16
+        )
+        # Cache device-specific memory flush — called after each inference to prevent GC stalls
+        if self._device_type == "mps":
+            self._flush_device_cache = torch.mps.empty_cache
+        elif self._device_type == "cuda":
+            self._flush_device_cache = torch.cuda.empty_cache
+        else:
+            self._flush_device_cache = lambda: None  # no-op on CPU
 
     def load_model(self) -> None:
         """Loads SAM 2 dependencies using Auto Classes framework."""
@@ -37,7 +57,54 @@ class Sam2Detector(BaseDetector):
         ).to(self.device)
 
         self.model.eval()
+        # torch.compile is applied ONLY on CUDA with dynamic=True to handle variable box counts.
+        # Skipped on MPS: the compiler attempts CUDA-graph paths that don't exist on Metal,
+        # causing repeated fallback-and-recompile cycles (the 10-12s spikes in logs).
+        if self._device_type == "cuda" and hasattr(torch, "compile"):
+            try:
+                self.model = torch.compile(self.model, dynamic=True)
+                logger.info("SAM 2 model compiled with torch.compile (dynamic=True).")
+            except Exception as compile_err:
+                logger.warning(f"torch.compile unavailable, skipping: {compile_err}")
+        self._warmup()
         logger.info("SAM 2 model loaded successfully.")
+
+    def _warmup(self) -> None:
+        """Runs a single dummy forward pass to pre-heat MPS/CUDA kernels.
+        Absorbs the first-call latency penalty at load time rather than at the first real request.
+        """
+        logger.info("SAM 2 running warmup forward pass...")
+        dummy_image = Image.new("RGB", (64, 64))
+        dummy_box = [[0.0, 0.0, 32.0, 32.0]]
+        inputs = self.processor(
+            images=dummy_image, input_boxes=[dummy_box], return_tensors="pt"
+        ).to(self.device)
+        with torch.inference_mode():
+            if self._use_autocast:
+                with torch.autocast(
+                    device_type=self._device_type, dtype=self._autocast_dtype
+                ):
+                    self.model(**inputs)
+            else:
+                self.model(**inputs)
+        self._flush_device_cache()
+        logger.info("SAM 2 warmup complete.")
+
+    def _resize_for_inference(
+        self, image: Image.Image, boxes: List[List[float]]
+    ) -> tuple:
+        """Optimization 3: downscales image + boxes so the longest side <= MAX_INFERENCE_SIDE.
+        Never upscales. Reduces SAM's preprocessing overhead for large input images.
+        Returns (resized_image, scaled_boxes, scale_factor).
+        """
+        w, h = image.size
+        scale = min(self.MAX_INFERENCE_SIDE / w, self.MAX_INFERENCE_SIDE / h, 1.0)
+        if scale == 1.0:
+            return image, boxes, 1.0
+        new_w, new_h = int(w * scale), int(h * scale)
+        resized = image.resize((new_w, new_h), Image.BILINEAR)
+        scaled_boxes = [[c * scale for c in b] for b in boxes]
+        return resized, scaled_boxes, scale
 
     @time_it("sam2_box_segmentation")
     def segment_with_boxes(
@@ -114,8 +181,13 @@ class Sam2Detector(BaseDetector):
         if self.model is None or self.processor is None:
             self.load_model()
 
-        orig_image = image.convert("RGB")
-        target_size = orig_image.size[::-1]
+        # Optimization 2: single RGBA conversion — reused for both compositing and RGB inference input
+        rgba_image = image.convert("RGBA")
+        orig_image = rgba_image.convert("RGB")
+        orig_target_size = orig_image.size[
+            ::-1
+        ]  # (H, W) — target for full-res output masks
+
         converted_boxes = [
             (
                 b["box"]
@@ -125,24 +197,35 @@ class Sam2Detector(BaseDetector):
             for b in box_inputs
         ]
 
+        # Optimization 3: downscale large images before processor to cut preprocessing overhead
+        infer_image, infer_boxes, _ = self._resize_for_inference(
+            orig_image, converted_boxes
+        )
+        infer_target_size = infer_image.size[
+            ::-1
+        ]  # (H, W) of the image the processor actually saw
+
         inputs = self.processor(
-            images=orig_image, input_boxes=[converted_boxes], return_tensors="pt"
+            images=infer_image, input_boxes=[infer_boxes], return_tensors="pt"
         ).to(self.device)
 
-        device_str = str(self.device).lower()
+        # Optimization 2: use pre-cached device type/dtype — no string parsing per call
         with torch.inference_mode():
-            if any(d in device_str for d in ["cuda", "mps"]):
-                device_type = "cuda" if "cuda" in device_str else "mps"
-                dtype = torch.bfloat16 if device_type == "mps" else torch.float16
-                with torch.autocast(device_type=device_type, dtype=dtype):
+            if self._use_autocast:
+                with torch.autocast(
+                    device_type=self._device_type, dtype=self._autocast_dtype
+                ):
                     outputs = self.model(**inputs)
             else:
                 outputs = self.model(**inputs)
 
+        # Get masks at inference resolution — post_process_masks only reliably works
+        # when target_sizes matches what the processor saw (original_sizes).
+        # Manual upscale to orig_target_size is handled per-mask below.
         raw_masks = self.processor.image_processor.post_process_masks(
             masks=outputs.pred_masks,
-            original_sizes=[target_size],
-            target_sizes=[target_size],
+            original_sizes=inputs.get("original_sizes").tolist(),
+            target_sizes=[infer_target_size],
         )
 
         masks_tensor = raw_masks[0] if isinstance(raw_masks, list) else raw_masks
@@ -157,15 +240,28 @@ class Sam2Detector(BaseDetector):
             iou_tensor = iou_tensor.squeeze(0)
 
         extracted_cutouts = []
-        img_np = np.array(image.convert("RGBA"))
+        img_np = np.array(
+            rgba_image
+        )  # reuse already-converted RGBA — no extra allocation
 
         for box_idx in range(len(converted_boxes)):
             best_mask_idx = torch.argmax(iou_tensor[box_idx]).item()
             binary_mask = (masks_tensor[box_idx, best_mask_idx] > 0.0).cpu().numpy()
 
+            # If image was downscaled for inference, upsample mask to original resolution
+            if binary_mask.shape != (orig_target_size[0], orig_target_size[1]):
+                mask_t = torch.from_numpy(binary_mask).float().unsqueeze(0).unsqueeze(0)
+                mask_t = torch.nn.functional.interpolate(
+                    mask_t, size=orig_target_size, mode="nearest"
+                )
+                binary_mask = mask_t.squeeze().numpy().astype(bool)
+
             cutout_np = np.zeros_like(img_np)
             cutout_np[binary_mask] = img_np[binary_mask]
             extracted_cutouts.append(Image.fromarray(cutout_np))
+
+        # Flush device memory buffers eagerly to prevent Metal/CUDA GC stalls on subsequent calls
+        self._flush_device_cache()
 
         return extracted_cutouts
 

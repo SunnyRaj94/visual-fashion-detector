@@ -34,3 +34,5 @@ logs/
 opencode.json
 
 docs/superpowers
+generate_notebooks.py
+detections.json
